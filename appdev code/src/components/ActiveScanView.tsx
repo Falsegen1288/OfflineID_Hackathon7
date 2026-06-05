@@ -3,6 +3,7 @@ import { Employee, AttendanceLog, GestureChallenge } from "../types";
 import { getEmployees, saveAttendanceLog } from "../database/db";
 import { simulateRecognition } from "../ml/pipeline";
 import { AlertTriangle, CheckCircle2, ShieldCheck } from "lucide-react";
+import { requestCameraStream, waitForVideoReady } from "../utils/camera";
 
 interface ActiveScanViewProps {
   onSuccess: (log: AttendanceLog) => void;
@@ -30,29 +31,54 @@ export const ActiveScanView: React.FC<ActiveScanViewProps> = ({ onSuccess }) => 
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const [cameraError, setCameraError] = useState<string | null>(null);
 
   useEffect(() => {
+    let active = true;
     const list = getEmployees();
     setEmployees(list);
     if (list.length > 0) {
       setSelectedSubjectId(list[0].id);
     }
     resetChallenge();
+    setCameraError(null);
 
-    navigator.mediaDevices
-      .getUserMedia({ video: { facingMode: "user", width: 400, height: 500 } })
-      .then((mediaStream) => {
+    requestCameraStream({
+      video: {
+        facingMode: "user",
+        width: { ideal: 1280 },
+        height: { ideal: 720 }
+      },
+      audio: false
+    })
+      .then(async (mediaStream) => {
+        if (!active) {
+          mediaStream.getTracks().forEach((track) => track.stop());
+          return;
+        }
         streamRef.current = mediaStream;
         setStream(mediaStream);
         if (videoRef.current) {
           videoRef.current.srcObject = mediaStream;
+          try {
+            await waitForVideoReady(videoRef.current);
+          } catch (err: any) {
+            console.warn("Video ready wait failed:", err);
+            if (active) {
+              setCameraError(err.message || "Failed to make video element ready");
+            }
+          }
         }
       })
-      .catch((err) => {
+      .catch((err: any) => {
         console.warn("Camera preview blocked or unavailable.", err);
+        if (active) {
+          setCameraError(err.message || "Camera access denied or failed");
+        }
       });
 
     return () => {
+      active = false;
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((track) => track.stop());
       }
@@ -174,16 +200,18 @@ export const ActiveScanView: React.FC<ActiveScanViewProps> = ({ onSuccess }) => 
             className="w-full h-full object-cover scale-x-[-1]"
           />
         ) : (
-          <div className="w-full h-full bg-gradient-to-br from-slate-900 via-slate-800 to-slate-950 flex items-center justify-center">
-            <div className="text-center text-slate-500">
-              <div className="w-20 h-20 mx-auto border-2 border-dashed border-slate-600 rounded-full flex items-center justify-center mb-3">
-                <svg className="w-8 h-8 text-slate-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                </svg>
-              </div>
-              <p className="text-xs font-medium">Camera Unavailable</p>
-              <p className="text-[10px] mt-1 text-slate-600">Using simulated scan mode</p>
+          <div className="w-full h-full bg-gradient-to-br from-slate-900 via-slate-800 to-slate-950 flex flex-col items-center justify-center text-center p-4">
+            <div className="w-16 h-16 bg-slate-800/80 rounded-full flex items-center justify-center text-slate-500 mb-2">
+              <svg className="w-6 h-6 text-slate-400 animate-pulse" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+              </svg>
             </div>
+            <p className="text-white text-xs font-semibold">Camera Offline</p>
+            {cameraError ? (
+              <p className="text-red-400 text-[10px] mt-1 px-4 max-w-xs">{cameraError}</p>
+            ) : (
+              <p className="text-slate-500 text-[10px] mt-0.5">Using simulated scan mode</p>
+            )}
           </div>
         )}
 

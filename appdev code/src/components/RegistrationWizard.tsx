@@ -3,6 +3,7 @@ import { Employee } from "../types";
 import { getOrCreateSecureKey, encryptFaceprint, saveEmployee } from "../database/db";
 import { handleFiveFrameAveraging } from "../ml/pipeline";
 import { ArrowRight, Camera, CheckCircle2, AlertCircle } from "lucide-react";
+import { requestCameraStream, waitForVideoReady, captureOnNextDecodedFrame } from "../utils/camera";
 
 interface RegistrationWizardProps {
   onSuccess: () => void;
@@ -28,24 +29,50 @@ export const RegistrationWizard: React.FC<RegistrationWizardProps> = ({ onSucces
   const streamRef = useRef<MediaStream | null>(null);
 
   useEffect(() => {
+    let active = true;
     if (step === 2) {
-      navigator.mediaDevices
-        .getUserMedia({ video: { facingMode: "user", width: 400, height: 500 } })
-        .then((stream) => {
+      setErrorMsg("");
+      requestCameraStream({
+        video: {
+          facingMode: "user",
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        },
+        audio: false
+      })
+        .then(async (stream) => {
+          if (!active) {
+            stream.getTracks().forEach((track) => track.stop());
+            return;
+          }
           streamRef.current = stream;
           setCameraStream(stream);
           if (videoRef.current) {
             videoRef.current.srcObject = stream;
+            try {
+              await waitForVideoReady(videoRef.current);
+            } catch (err: any) {
+              console.warn("Video ready wait failed:", err);
+              if (active) {
+                setErrorMsg(err.message || "Failed to make video element ready");
+              }
+            }
           }
         })
-        .catch((err) => {
-          console.warn("Camera access denied:", err);
+        .catch((err: any) => {
+          console.warn("Camera access failed:", err);
+          if (active) {
+            setErrorMsg(err.message || "Camera access denied or failed");
+          }
         });
     } else {
       stopCamera();
     }
 
-    return () => { stopCamera(); };
+    return () => {
+      active = false;
+      stopCamera();
+    };
   }, [step]);
 
   const stopCamera = () => {
@@ -63,38 +90,52 @@ export const RegistrationWizard: React.FC<RegistrationWizardProps> = ({ onSucces
     setStep(2);
   };
 
-  const startSequentialAveraging = () => {
+  const startSequentialAveraging = async () => {
     setIsCapturing(true);
     setFramesCaptured(0);
+    setErrorMsg("");
     
-    let count = 0;
-    const interval = setInterval(() => {
-      count++;
-      setFramesCaptured(count);
+    try {
+      const frames: string[] = [];
+      const FRAME_INTERVAL_MS = 400;
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
       
-      if (canvasRef.current && videoRef.current && streamRef.current) {
-        const canvas = canvasRef.current;
-        const ctx = canvas.getContext("2d");
-        if (ctx) {
-          ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-          if (count === 5) {
-            const dataUrl = canvas.toDataURL("image/jpeg");
-            setCapturedPhoto(dataUrl);
+      if (!cameraStream || !video || !canvas) {
+        // Fallback for simulation mode
+        for (let i = 0; i < 5; i++) {
+          if (i > 0) {
+            await new Promise((r) => setTimeout(r, FRAME_INTERVAL_MS));
           }
+          setFramesCaptured(i + 1);
         }
-      } else {
-        if (count === 5) {
-          setCapturedPhoto(null);
-        }
-      }
-      
-      if (count >= 5) {
-        clearInterval(interval);
+        setCapturedPhoto(null);
         setIsCapturing(false);
-        stopCamera();
         setTimeout(() => setStep(3), 800);
+        return;
       }
-    }, 400);
+
+      for (let i = 0; i < 5; i++) {
+        if (i > 0) {
+          await new Promise((r) => setTimeout(r, FRAME_INTERVAL_MS));
+        }
+
+        const dataUrl = await captureOnNextDecodedFrame(video, canvas);
+        frames.push(dataUrl);
+        setFramesCaptured(i + 1);
+      }
+
+      const lastDataUrl = frames[frames.length - 1];
+      setCapturedPhoto(lastDataUrl);
+      
+      setIsCapturing(false);
+      stopCamera();
+      setTimeout(() => setStep(3), 800);
+    } catch (err: any) {
+      console.error("Frame capture error:", err);
+      setErrorMsg(err.message || "Failed to capture frames from camera");
+      setIsCapturing(false);
+    }
   };
 
   const handleFinalRegister = () => {
@@ -310,6 +351,12 @@ export const RegistrationWizard: React.FC<RegistrationWizardProps> = ({ onSucces
               5 captures are mathematically merged into a single robust embedding.
             </p>
 
+            {errorMsg && (
+              <p className="text-red-500 text-xs font-semibold text-center bg-red-50 p-2 rounded-lg border border-red-100 animate-fade-in w-full max-w-xs mx-auto">
+                {errorMsg}
+              </p>
+            )}
+
             <button
               id="capture-btn"
               onClick={startSequentialAveraging}
@@ -338,7 +385,7 @@ export const RegistrationWizard: React.FC<RegistrationWizardProps> = ({ onSucces
               
               {/* Avatar */}
               <div className="flex justify-center">
-                <div className="relative w-28 h-28 rounded-full border-4 border-[#005bbf] p-0.5 shadow-lg animate-pulse-glow">
+                <div className="relative w-28 h-28 rounded-full border-4 border-[#005bbf] p-0.5 shadow-lg animate-pulse-glow bg-slate-800">
                   {capturedPhoto ? (
                     <img
                       id="captured-avatar"
@@ -347,8 +394,10 @@ export const RegistrationWizard: React.FC<RegistrationWizardProps> = ({ onSucces
                       className="w-full h-full object-cover rounded-full"
                     />
                   ) : (
-                    <div className="w-full h-full rounded-full bg-gradient-to-br from-[#005bbf] to-[#0047a3] flex items-center justify-center text-white text-3xl font-bold">
-                      {name.charAt(0).toUpperCase()}
+                    <div className="w-full h-full rounded-full bg-slate-800 text-slate-400 p-4 flex items-center justify-center">
+                      <svg className="w-full h-full" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M24 20.993V24H0v-2.996A14.977 14.977 0 0112.004 15c4.904 0 9.26 2.354 11.996 5.993zM16.002 8.999a4 4 0 11-8 0 4 4 0 018 0z" />
+                      </svg>
                     </div>
                   )}
                   <div className="absolute bottom-0 right-0 bg-[#00722f] text-white p-1 rounded-full shadow-md leading-none border-2 border-white">
