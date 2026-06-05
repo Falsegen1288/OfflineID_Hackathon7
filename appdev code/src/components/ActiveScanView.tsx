@@ -3,7 +3,7 @@ import { Employee, AttendanceLog, GestureChallenge } from "../types";
 import { getEmployees, saveAttendanceLog } from "../database/db";
 import { simulateRecognition } from "../ml/pipeline";
 import { AlertTriangle, CheckCircle2, ShieldCheck } from "lucide-react";
-import { requestCameraStream, waitForVideoReady } from "../utils/camera";
+import { startCamera, waitForVideoReady } from "../utils/camera";
 
 interface ActiveScanViewProps {
   onSuccess: (log: AttendanceLog) => void;
@@ -32,6 +32,15 @@ export const ActiveScanView: React.FC<ActiveScanViewProps> = ({ onSuccess }) => 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
+  const [cameraRetryCount, setCameraRetryCount] = useState(0);
+
+  const stopCamera = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+      setStream(null);
+    }
+  };
 
   useEffect(() => {
     let active = true;
@@ -43,47 +52,44 @@ export const ActiveScanView: React.FC<ActiveScanViewProps> = ({ onSuccess }) => 
     resetChallenge();
     setCameraError(null);
 
-    requestCameraStream({
-      video: {
-        facingMode: "user",
-        width: { ideal: 1280 },
-        height: { ideal: 720 }
-      },
-      audio: false
-    })
-      .then(async (mediaStream) => {
+    const video = videoRef.current;
+    console.log('[active-scan] useEffect fired, videoRef.current:', video);
+
+    if (!video) {
+      console.error('[active-scan] videoRef.current is NULL — video element not mounted yet');
+      setCameraError("Internal render error: Video element ref is not bound.");
+      return;
+    }
+
+    startCamera(video)
+      .then((mediaStream) => {
         if (!active) {
           mediaStream.getTracks().forEach((track) => track.stop());
           return;
         }
+        console.log('[active-scan] startCamera resolved');
         streamRef.current = mediaStream;
         setStream(mediaStream);
-        if (videoRef.current) {
-          videoRef.current.srcObject = mediaStream;
-          try {
-            await waitForVideoReady(videoRef.current);
-          } catch (err: any) {
-            console.warn("Video ready wait failed:", err);
-            if (active) {
-              setCameraError(err.message || "Failed to make video element ready");
-            }
-          }
+        return waitForVideoReady(video);
+      })
+      .then(() => {
+        if (active) {
+          console.log('[active-scan] waitForVideoReady resolved');
         }
       })
       .catch((err: any) => {
-        console.warn("Camera preview blocked or unavailable.", err);
+        console.error('[active-scan] Camera chain failed at:', err.name, err.message);
         if (active) {
           setCameraError(err.message || "Camera access denied or failed");
+          stopCamera();
         }
       });
 
     return () => {
       active = false;
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((track) => track.stop());
-      }
+      stopCamera();
     };
-  }, []);
+  }, [cameraRetryCount]);
 
   useEffect(() => {
     if (scanStatus !== "scanning") return;
@@ -191,29 +197,41 @@ export const ActiveScanView: React.FC<ActiveScanViewProps> = ({ onSuccess }) => 
       
       {/* Video / Background */}
       <div className="absolute inset-0 z-0 bg-neutral-950">
-        {stream ? (
-          <video
-            ref={videoRef}
-            autoPlay
-            playsInline
-            muted
-            className="w-full h-full object-cover scale-x-[-1]"
-          />
-        ) : (
-          <div className="w-full h-full bg-gradient-to-br from-slate-900 via-slate-800 to-slate-950 flex flex-col items-center justify-center text-center p-4">
+        <video
+          ref={videoRef}
+          autoPlay
+          playsInline
+          muted
+          className={`w-full h-full object-cover scale-x-[-1] ${stream ? "block" : "hidden"}`}
+        />
+        {!stream && cameraError ? (
+          <div className="w-full h-full absolute inset-0 bg-gradient-to-br from-slate-900 via-slate-800 to-slate-950 flex flex-col items-center justify-center text-center p-4 z-10 animate-fade-in">
+            <div className="w-16 h-16 bg-red-950/50 rounded-full flex items-center justify-center text-red-500 mb-2 border border-red-500/20">
+              <AlertTriangle className="w-6 h-6 animate-pulse" />
+            </div>
+            <p className="text-red-400 text-xs font-bold">Camera Initialization Failed</p>
+            <p className="text-slate-400 text-[10px] mt-1 max-w-[220px] leading-normal">{cameraError}</p>
+            <button
+              onClick={() => {
+                setCameraError(null);
+                setCameraRetryCount(prev => prev + 1);
+              }}
+              className="mt-3 bg-red-900/40 hover:bg-red-900/60 border border-red-500/30 text-red-200 px-4 py-1.5 rounded-full text-[10px] font-bold active:scale-95 transition-spring cursor-pointer"
+            >
+              Retry Connection
+            </button>
+          </div>
+        ) : !stream ? (
+          <div className="w-full h-full bg-gradient-to-br from-slate-900 via-slate-800 to-slate-950 flex flex-col items-center justify-center text-center p-4 animate-fade-in">
             <div className="w-16 h-16 bg-slate-800/80 rounded-full flex items-center justify-center text-slate-500 mb-2">
               <svg className="w-6 h-6 text-slate-400 animate-pulse" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
               </svg>
             </div>
             <p className="text-white text-xs font-semibold">Camera Offline</p>
-            {cameraError ? (
-              <p className="text-red-400 text-[10px] mt-1 px-4 max-w-xs">{cameraError}</p>
-            ) : (
-              <p className="text-slate-500 text-[10px] mt-0.5">Using simulated scan mode</p>
-            )}
+            <p className="text-slate-500 text-[10px] mt-0.5">Using simulated scan mode</p>
           </div>
-        )}
+        ) : null}
 
         {/* Scrim overlay with center cutout */}
         <div

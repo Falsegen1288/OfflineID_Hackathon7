@@ -17,6 +17,41 @@ export async function requestCameraStream(
   return navigator.mediaDevices.getUserMedia(constraints);
 }
 
+export async function startCamera(videoElement: HTMLVideoElement): Promise<MediaStream> {
+  console.log('[camera] startCamera() called');
+  console.log('[camera] videoElement:', videoElement);
+  console.log('[camera] videoElement.isConnected:', videoElement.isConnected);
+
+  if (!window.isSecureContext) {
+    throw new Error('[camera] Not a secure context');
+  }
+
+  if (!navigator.mediaDevices?.getUserMedia) {
+    throw new Error('[camera] getUserMedia not available');
+  }
+
+  console.log('[camera] Calling getUserMedia...');
+
+  let stream: MediaStream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false,
+    });
+    console.log('[camera] getUserMedia succeeded:', stream);
+    console.log('[camera] tracks:', stream.getVideoTracks());
+  } catch (err: any) {
+    console.error('[camera] getUserMedia FAILED:', err.name, err.message);
+    throw err;
+  }
+
+  console.log('[camera] Assigning srcObject...');
+  videoElement.srcObject = stream;
+  console.log('[camera] srcObject after assignment:', videoElement.srcObject);
+
+  return stream;
+}
+
 /**
  * Waits for a video element to be fully ready to have its frames drawn.
  * Resolves when:
@@ -26,8 +61,20 @@ export async function requestCameraStream(
  */
 export function waitForVideoReady(video: HTMLVideoElement): Promise<void> {
   return new Promise((resolve, reject) => {
-    const TIMEOUT_MS = 10_000;
-    
+    const TIMEOUT_MS = 8000; // 8 second hard ceiling
+
+    let settled = false;
+
+    const settle = (fn: () => void) => {
+      if (settred()) return;
+      settled = true;
+      cleanup();
+      fn();
+    };
+
+    // Helper to check if settled to prevent TypeScript warning
+    const settred = () => settled;
+
     const cleanup = () => {
       video.removeEventListener("canplay", onReady);
       video.removeEventListener("playing", onReady);
@@ -37,8 +84,8 @@ export function waitForVideoReady(video: HTMLVideoElement): Promise<void> {
     };
 
     const onReady = () => {
-      if (video.videoWidth > 0 && video.videoHeight > 0 && video.readyState >= 3) {
-        cleanup();
+      if (video.videoWidth === 0) return; // dimensions not yet negotiated, keep waiting
+      settle(() => {
         video.muted = true;
         video.setAttribute("playsinline", "true");
         video.setAttribute("autoplay", "true");
@@ -47,20 +94,35 @@ export function waitForVideoReady(video: HTMLVideoElement): Promise<void> {
             requestAnimationFrame(() => resolve());
           })
           .catch((err) => {
-            console.warn("video.play() failed but dimensions are negotiated. Resolving to allow capture attempts:", err);
-            resolve();
+            // If play() is blocked but dimensions exist, resolve anyway
+            // Canvas can still draw from the stream surface
+            if (video.videoWidth > 0) {
+              console.warn("play() blocked but stream active, proceeding:", err.message);
+              requestAnimationFrame(() => resolve());
+            } else {
+              reject(err);
+            }
           });
-      }
+      });
     };
 
     const onError = () => {
-      cleanup();
-      reject(new Error(`Video error: ${video.error?.message ?? "unknown"}`));
+      settle(() => reject(new Error(`Video element error: ${video.error?.message ?? "unknown"}`)));
     };
 
     const timeoutId = setTimeout(() => {
-      cleanup();
-      reject(new Error("Camera stream timed out — video never became ready"));
+      settle(() => {
+        // Last-chance check before giving up: check for readyState >= 3 and videoWidth > 0
+        if (video.readyState >= 3 && video.videoWidth > 0) {
+          console.warn("waitForVideoReady: timeout hit but stream looks usable (readyState >= 3), resolving");
+          resolve();
+        } else {
+          reject(new Error(
+            `Camera stream timed out. readyState=${video.readyState}, ` +
+            `videoWidth=${video.videoWidth}, paused=${video.paused}`
+          ));
+        }
+      });
     }, TIMEOUT_MS);
 
     video.addEventListener("canplay", onReady);
@@ -68,8 +130,8 @@ export function waitForVideoReady(video: HTMLVideoElement): Promise<void> {
     video.addEventListener("loadeddata", onReady);
     video.addEventListener("error", onError);
 
-    // Immediate check if it's already ready
-    if (video.videoWidth > 0 && video.videoHeight > 0 && video.readyState >= 3) {
+    // Immediate check — event may have already fired before listener attached
+    if (video.readyState >= 3 && video.videoWidth > 0) {
       onReady();
     }
   });

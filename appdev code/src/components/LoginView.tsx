@@ -3,7 +3,7 @@ import { AccessRole, Employee, AttendanceLog, GestureChallenge } from "../types"
 import { getEmployees, saveAttendanceLog, getOrCreateSecureKey, decryptFaceprint } from "../database/db";
 import { simulateRecognition } from "../ml/pipeline";
 import { User, Shield, Lock, LogIn, CloudOff, ShieldCheck, Camera, CheckCircle2, AlertTriangle, ArrowRight, UserPlus } from "lucide-react";
-import { requestCameraStream, waitForVideoReady } from "../utils/camera";
+import { startCamera, waitForVideoReady } from "../utils/camera";
 
 interface LoginViewProps {
   onLoginSuccess: (role: AccessRole, username: string) => void;
@@ -51,6 +51,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
   const [isLoading, setIsLoading] = useState(false);
 
   const [cameraError, setCameraError] = useState<string | null>(null);
+  const [cameraRetryCount, setCameraRetryCount] = useState(0);
 
   // ── Camera Initialization Effect ───────────────────────────────────
   useEffect(() => {
@@ -68,37 +69,36 @@ export const LoginView: React.FC<LoginViewProps> = ({
     resetChallenge();
     setCameraError(null);
 
-    requestCameraStream({
-      video: {
-        facingMode: "user",
-        width: { ideal: 1280 },
-        height: { ideal: 720 }
-      },
-      audio: false
-    })
-      .then(async (mediaStream) => {
+    const video = videoRef.current;
+    console.log('[login] useEffect fired, videoRef.current:', video);
+
+    if (!video) {
+      console.error('[login] videoRef.current is NULL — video element not mounted yet');
+      setCameraError("Internal render error: Video element ref is not bound.");
+      return;
+    }
+
+    startCamera(video)
+      .then((mediaStream) => {
         if (!active) {
           mediaStream.getTracks().forEach((track) => track.stop());
           return;
         }
+        console.log('[login] startCamera resolved');
         streamRef.current = mediaStream;
         setStream(mediaStream);
-        if (videoRef.current) {
-          videoRef.current.srcObject = mediaStream;
-          try {
-            await waitForVideoReady(videoRef.current);
-          } catch (err: any) {
-            console.warn("Video ready wait failed:", err);
-            if (active) {
-              setCameraError(err.message || "Failed to make video element ready");
-            }
-          }
+        return waitForVideoReady(video);
+      })
+      .then(() => {
+        if (active) {
+          console.log('[login] waitForVideoReady resolved');
         }
       })
       .catch((err: any) => {
-        console.warn("Camera preview blocked or unavailable.", err);
+        console.error('[login] Camera chain failed at:', err.name, err.message);
         if (active) {
           setCameraError(err.message || "Camera access denied or failed");
+          stopCamera();
         }
       });
 
@@ -106,7 +106,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
       active = false;
       stopCamera();
     };
-  }, [subMode]);
+  }, [subMode, cameraRetryCount]);
 
   // ── Countdown Timer Effect ─────────────────────────────────────────
   useEffect(() => {
@@ -329,21 +329,39 @@ export const LoginView: React.FC<LoginViewProps> = ({
 
           {/* Biometric Camera View */}
           <div className="relative w-full aspect-[3/3.8] rounded-2xl overflow-hidden bg-slate-900 border border-slate-200 shadow-md flex items-center justify-center my-2.5">
-            {stream ? (
-              <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover scale-x-[-1]" />
-            ) : (
-              <div className="w-full h-full bg-gradient-to-br from-slate-900 via-slate-800 to-slate-950 flex flex-col items-center justify-center text-center p-4">
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              className={`w-full h-full object-cover scale-x-[-1] ${stream ? "block" : "hidden"}`}
+            />
+            {!stream && cameraError ? (
+              <div className="w-full h-full absolute inset-0 bg-gradient-to-br from-slate-900 via-slate-800 to-slate-950 flex flex-col items-center justify-center text-center p-4 z-10 animate-fade-in">
+                <div className="w-12 h-12 bg-red-950/50 rounded-full flex items-center justify-center text-red-500 mb-2 border border-red-500/20">
+                  <AlertTriangle className="w-5 h-5 animate-pulse" />
+                </div>
+                <p className="text-red-400 text-xs font-bold">Camera Initialization Failed</p>
+                <p className="text-slate-400 text-[10px] mt-1 max-w-[220px] leading-normal">{cameraError}</p>
+                <button
+                  onClick={() => {
+                    setCameraError(null);
+                    setCameraRetryCount(prev => prev + 1);
+                  }}
+                  className="mt-3 bg-red-900/40 hover:bg-red-900/60 border border-red-500/30 text-red-200 px-4 py-1.5 rounded-full text-[10px] font-bold active:scale-95 transition-spring cursor-pointer"
+                >
+                  Retry Connection
+                </button>
+              </div>
+            ) : !stream ? (
+              <div className="w-full h-full bg-gradient-to-br from-slate-900 via-slate-800 to-slate-950 flex flex-col items-center justify-center text-center p-4 animate-fade-in">
                 <div className="w-12 h-12 bg-slate-800 rounded-full flex items-center justify-center text-slate-500 mb-2">
                   <Camera className="w-5 h-5 animate-pulse" />
                 </div>
                 <p className="text-white text-xs font-semibold">Camera Offline</p>
-                {cameraError ? (
-                  <p className="text-red-400 text-[10px] mt-1 px-4 max-w-xs">{cameraError}</p>
-                ) : (
-                  <p className="text-slate-500 text-[10px] mt-0.5">Using simulated scan mode</p>
-                )}
+                <p className="text-slate-500 text-[10px] mt-0.5">Using simulated scan mode</p>
               </div>
-            )}
+            ) : null}
 
             {/* Oval Cutout Overlay */}
             <div className="absolute inset-0 bg-black/60 pointer-events-none"

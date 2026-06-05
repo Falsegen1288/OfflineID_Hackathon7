@@ -1,9 +1,46 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useCallback } from "react";
 import { Employee } from "../types";
 import { getOrCreateSecureKey, encryptFaceprint, saveEmployee } from "../database/db";
 import { handleFiveFrameAveraging } from "../ml/pipeline";
 import { ArrowRight, Camera, CheckCircle2, AlertCircle } from "lucide-react";
-import { requestCameraStream, waitForVideoReady, captureWithRetry } from "../utils/camera";
+import { startCamera, waitForVideoReady, captureWithRetry } from "../utils/camera";
+
+const GESTURE_SEQUENCE = [
+  {
+    id: 'still',
+    instruction: 'Hold still and look at the camera',
+    icon: '🎯',
+    holdMs: 1500,   // how long user must hold before frame is captured
+  },
+  {
+    id: 'turn_right',
+    instruction: 'Slowly turn your head to the right',
+    icon: '➡️',
+    holdMs: 1200,
+  },
+  {
+    id: 'turn_left',
+    instruction: 'Slowly turn your head to the left',
+    icon: '⬅️',
+    holdMs: 1200,
+  },
+  {
+    id: 'blink',
+    instruction: 'Blink your eyes naturally',
+    icon: '👁️',
+    holdMs: 800,
+  },
+  {
+    id: 'smile',
+    instruction: 'Give a natural smile',
+    icon: '😊',
+    holdMs: 800,
+  },
+] as const;
+
+type GestureId = typeof GESTURE_SEQUENCE[number]['id'];
+
+const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 interface RegistrationWizardProps {
   onSuccess: () => void;
@@ -20,6 +57,7 @@ export const RegistrationWizard: React.FC<RegistrationWizardProps> = ({ onSucces
   const [phone, setPhone] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
 
+  const [cameraRetryCount, setCameraRetryCount] = useState(0);
   const [isCameraReady, setIsCameraReady] = useState(false);
   const [framesCaptured, setFramesCaptured] = useState(0);
   const [isCapturing, setIsCapturing] = useState(false);
@@ -29,45 +67,47 @@ export const RegistrationWizard: React.FC<RegistrationWizardProps> = ({ onSucces
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
+  const [currentGestureIndex, setCurrentGestureIndex] = useState(0);
+  const [gesturePhase, setGesturePhase] = useState<'instruction' | 'countdown' | 'capturing' | 'done'>('instruction');
+  const [countdown, setCountdown] = useState(3);
+
   useEffect(() => {
     let active = true;
     if (step === 2) {
       setErrorMsg("");
       setIsCameraReady(false);
-      requestCameraStream({
-        video: {
-          facingMode: "user",
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
-        },
-        audio: false
-      })
-        .then(async (stream) => {
+
+      const video = videoRef.current;
+      console.log('[wizard] useEffect fired, videoRef.current:', video);
+
+      if (!video) {
+        console.error('[wizard] videoRef.current is NULL — video element not mounted yet');
+        setErrorMsg("Internal render error: Video element ref is not bound.");
+        return;
+      }
+
+      startCamera(video)
+        .then((stream) => {
           if (!active) {
             stream.getTracks().forEach((track) => track.stop());
             return;
           }
+          console.log('[wizard] startCamera resolved');
           streamRef.current = stream;
           setCameraStream(stream);
-          if (videoRef.current) {
-            videoRef.current.srcObject = stream;
-            try {
-              await waitForVideoReady(videoRef.current);
-              if (active) {
-                setIsCameraReady(true);
-              }
-            } catch (err: any) {
-              console.warn("Video ready wait failed:", err);
-              if (active) {
-                setErrorMsg(err.message || "Failed to make video element ready");
-              }
-            }
+          return waitForVideoReady(video);
+        })
+        .then(() => {
+          if (active) {
+            console.log('[wizard] waitForVideoReady resolved — setting isCameraReady true');
+            setIsCameraReady(true);
           }
         })
-        .catch((err: any) => {
-          console.warn("Camera access failed:", err);
+        .catch((err) => {
+          console.error('[wizard] Camera chain failed at:', err.name, err.message);
           if (active) {
             setErrorMsg(err.message || "Camera access denied or failed");
+            stopCamera();
           }
         });
     } else {
@@ -78,7 +118,7 @@ export const RegistrationWizard: React.FC<RegistrationWizardProps> = ({ onSucces
       active = false;
       stopCamera();
     };
-  }, [step]);
+  }, [step, cameraRetryCount]);
 
   const stopCamera = () => {
     if (streamRef.current) {
@@ -96,44 +136,55 @@ export const RegistrationWizard: React.FC<RegistrationWizardProps> = ({ onSucces
     setStep(2);
   };
 
-  const startSequentialAveraging = async () => {
+  const runGestureCaptureSequence = useCallback(async () => {
     setIsCapturing(true);
     setFramesCaptured(0);
     setErrorMsg("");
-    
+
+    const frames: string[] = [];
+
     try {
-      const frames: string[] = [];
-      const FRAME_INTERVAL_MS = 400;
-      const video = videoRef.current;
-      const canvas = canvasRef.current;
-      
-      if (!cameraStream || !video || !canvas) {
-        // Fallback for simulation mode
-        for (let i = 0; i < 5; i++) {
-          if (i > 0) {
-            await new Promise((r) => setTimeout(r, FRAME_INTERVAL_MS));
-          }
-          setFramesCaptured(i + 1);
-        }
-        setCapturedPhoto(null);
-        setIsCapturing(false);
-        setTimeout(() => setStep(3), 800);
-        return;
-      }
+      for (let i = 0; i < GESTURE_SEQUENCE.length; i++) {
+        const gesture = GESTURE_SEQUENCE[i];
 
-      for (let i = 0; i < 5; i++) {
-        if (i > 0) {
-          await new Promise((r) => setTimeout(r, FRAME_INTERVAL_MS));
+        // Phase 1: Show instruction
+        setCurrentGestureIndex(i);
+        setGesturePhase('instruction');
+        await delay(1800); // user reads the instruction
+
+        // Phase 2: Countdown
+        setGesturePhase('countdown');
+        for (let c = 3; c >= 1; c--) {
+          setCountdown(c);
+          await delay(700);
         }
 
-        const dataUrl = await captureWithRetry(video, canvas);
-        frames.push(dataUrl);
+        // Phase 3: Capture the frame
+        setGesturePhase('capturing');
+        await delay(gesture.holdMs); // wait for user to hold the gesture
+
+        let dataUrl: string | null = null;
+        if (cameraStream && videoRef.current && canvasRef.current) {
+          dataUrl = await captureWithRetry(videoRef.current, canvasRef.current);
+          frames.push(dataUrl);
+        } else {
+          // Simulator fallback
+          await delay(300);
+        }
+        
         setFramesCaptured(i + 1);
+        await delay(400);
       }
 
-      const lastDataUrl = frames[frames.length - 1];
-      setCapturedPhoto(lastDataUrl);
+      setGesturePhase('done');
       
+      if (frames.length > 0) {
+        const lastDataUrl = frames[frames.length - 1];
+        setCapturedPhoto(lastDataUrl);
+      } else {
+        setCapturedPhoto(null);
+      }
+
       setIsCapturing(false);
       stopCamera();
       setTimeout(() => setStep(3), 800);
@@ -142,7 +193,7 @@ export const RegistrationWizard: React.FC<RegistrationWizardProps> = ({ onSucces
       setErrorMsg(err.message || "Failed to capture frames from camera");
       setIsCapturing(false);
     }
-  };
+  }, [cameraStream]);
 
   const handleFinalRegister = () => {
     const key = getOrCreateSecureKey();
@@ -303,15 +354,69 @@ export const RegistrationWizard: React.FC<RegistrationWizardProps> = ({ onSucces
           <section id="step-2" className="space-y-4 animate-fade-in flex flex-col items-center">
             <div className="relative w-full aspect-[3/3.8] rounded-2xl overflow-hidden bg-slate-900 border border-slate-700 shadow-lg flex items-center justify-center">
               
-              {cameraStream ? (
-                <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover scale-x-[-1]" />
-              ) : (
-                <div className="w-full h-full absolute inset-0 bg-gradient-to-br from-slate-900 to-slate-950 flex flex-col items-center justify-center text-center p-4">
+              <video
+                ref={videoRef}
+                autoPlay
+                playsInline
+                muted
+                className={`w-full h-full object-cover scale-x-[-1] transition-opacity duration-300 ${
+                  isCameraReady ? 'opacity-100' : 'opacity-0'
+                }`}
+              />
+
+              {!cameraStream && errorMsg ? (
+                <div className="w-full h-full absolute inset-0 bg-gradient-to-br from-slate-900 to-slate-950 flex flex-col items-center justify-center text-center p-4 z-10 animate-fade-in">
+                  <div className="w-16 h-16 bg-red-950/50 rounded-full flex items-center justify-center text-red-500 mb-2 border border-red-500/20">
+                    <AlertCircle className="w-6 h-6 animate-pulse" />
+                  </div>
+                  <p className="text-red-400 text-xs font-bold">Camera Initialization Failed</p>
+                  <p className="text-slate-400 text-[10px] mt-1 max-w-[220px] leading-normal">{errorMsg}</p>
+                  <button
+                    onClick={() => {
+                      setErrorMsg("");
+                      setCameraRetryCount(prev => prev + 1);
+                    }}
+                    className="mt-3 bg-red-900/40 hover:bg-red-900/60 border border-red-500/30 text-red-200 px-4 py-1.5 rounded-full text-[10px] font-bold active:scale-95 transition-spring cursor-pointer"
+                  >
+                    Retry Connection
+                  </button>
+                </div>
+              ) : !cameraStream ? (
+                <div className="w-full h-full absolute inset-0 bg-gradient-to-br from-slate-900 to-slate-950 flex flex-col items-center justify-center text-center p-4 animate-fade-in">
                   <div className="w-16 h-16 bg-slate-800 rounded-full flex items-center justify-center text-slate-500 mb-2">
                     <Camera className="w-6 h-6 animate-pulse" />
                   </div>
                   <p className="text-white text-xs font-medium">Simulator camera mode</p>
                   <p className="text-slate-500 text-[11px] mt-1">Click Capture to proceed</p>
+                </div>
+              ) : null}
+
+              {/* Gesture UI Overlay */}
+              {isCameraReady && gesturePhase !== 'done' && (
+                <div className="absolute inset-x-0 top-4 flex flex-col items-center z-20 px-4">
+                  {/* Gesture instruction card */}
+                  <div className="bg-black/70 backdrop-blur-sm rounded-2xl px-5 py-3 flex items-center gap-3 border border-white/10">
+                    <span className="text-2xl">{GESTURE_SEQUENCE[currentGestureIndex].icon}</span>
+                    <span className="text-white text-sm font-medium text-center">
+                      {GESTURE_SEQUENCE[currentGestureIndex].instruction}
+                    </span>
+                  </div>
+
+                  {/* Countdown pulse ring */}
+                  {gesturePhase === 'countdown' && (
+                    <div className="mt-3 w-12 h-12 rounded-full border-4 border-blue-400 flex items-center justify-center animate-pulse bg-black/40">
+                      <span className="text-white text-lg font-bold">{countdown}</span>
+                    </div>
+                  )}
+
+                  {/* Capturing flash indicator */}
+                  {gesturePhase === 'capturing' && (
+                    <div className="mt-3 px-3 py-1 bg-green-500/80 rounded-full">
+                      <span className="text-white text-xs font-semibold tracking-wider">
+                        ● CAPTURING
+                      </span>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -328,27 +433,24 @@ export const RegistrationWizard: React.FC<RegistrationWizardProps> = ({ onSucces
                 }`} id="camera-guide"></div>
               </div>
 
-              {/* Frame counter */}
-              <div className="absolute top-4 left-0 w-full flex justify-center">
-                <div className="glass-dark px-4 py-1.5 rounded-full flex items-center gap-2">
-                  <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span>
-                  <span className="text-[10px] font-bold text-white uppercase tracking-wider">
-                    {framesCaptured}/5 frames
-                  </span>
-                </div>
-              </div>
-
-              {/* Progress overlay */}
-              {isCapturing && (
-                <div className="absolute bottom-4 left-4 right-4 glass-dark p-2 rounded-lg text-center">
-                  <div className="h-1 bg-slate-700 rounded-full overflow-hidden w-full">
-                    <div className="bg-emerald-500 h-full transition-all duration-300 animate-progress-stripe" style={{ width: `${(framesCaptured/5)*100}%` }}></div>
-                  </div>
-                  <p className="text-emerald-400 text-[10px] mt-1 font-semibold tracking-wide">
-                    {framesCaptured < 5 ? "AVERAGING SIGNAL METRICS" : "COMPLETE!"}
-                  </p>
+              {/* Frame progress dots at bottom */}
+              {isCameraReady && (
+                <div className="absolute bottom-4 inset-x-0 flex justify-center gap-2 z-20">
+                  {GESTURE_SEQUENCE.map((g, i) => (
+                    <div
+                      key={g.id}
+                      className={`w-2 h-2 rounded-full transition-all duration-300 ${
+                        i < framesCaptured
+                          ? 'bg-green-400 scale-125'
+                          : i === currentGestureIndex
+                          ? 'bg-blue-400 animate-pulse'
+                          : 'bg-white/30'
+                      }`}
+                    />
+                  ))}
                 </div>
               )}
+
             </div>
 
             <canvas ref={canvasRef} width="400" height="500" className="hidden" />
@@ -365,7 +467,7 @@ export const RegistrationWizard: React.FC<RegistrationWizardProps> = ({ onSucces
 
             <button
               id="capture-btn"
-              onClick={startSequentialAveraging}
+              onClick={runGestureCaptureSequence}
               disabled={isCapturing || (!!cameraStream && !isCameraReady)}
               className="w-full h-11 btn-primary rounded-full flex items-center justify-center gap-2 text-xs font-bold disabled:opacity-50 disabled:cursor-not-allowed"
             >
