@@ -3,7 +3,7 @@ import { Employee } from "../types";
 import { getOrCreateSecureKey, encryptFaceprint, saveEmployee } from "../database/db";
 import { handleFiveFrameAveraging } from "../ml/pipeline";
 import { ArrowRight, Camera, CheckCircle2, AlertCircle } from "lucide-react";
-import { requestCameraStream, waitForVideoReady, captureOnNextDecodedFrame } from "../utils/camera";
+import { requestCameraStream, waitForVideoReady, captureWithRetry } from "../utils/camera";
 
 interface RegistrationWizardProps {
   onSuccess: () => void;
@@ -20,6 +20,7 @@ export const RegistrationWizard: React.FC<RegistrationWizardProps> = ({ onSucces
   const [phone, setPhone] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
 
+  const [isCameraReady, setIsCameraReady] = useState(false);
   const [framesCaptured, setFramesCaptured] = useState(0);
   const [isCapturing, setIsCapturing] = useState(false);
   const [capturedPhoto, setCapturedPhoto] = useState<string | null>(null);
@@ -32,6 +33,7 @@ export const RegistrationWizard: React.FC<RegistrationWizardProps> = ({ onSucces
     let active = true;
     if (step === 2) {
       setErrorMsg("");
+      setIsCameraReady(false);
       requestCameraStream({
         video: {
           facingMode: "user",
@@ -51,6 +53,9 @@ export const RegistrationWizard: React.FC<RegistrationWizardProps> = ({ onSucces
             videoRef.current.srcObject = stream;
             try {
               await waitForVideoReady(videoRef.current);
+              if (active) {
+                setIsCameraReady(true);
+              }
             } catch (err: any) {
               console.warn("Video ready wait failed:", err);
               if (active) {
@@ -81,6 +86,7 @@ export const RegistrationWizard: React.FC<RegistrationWizardProps> = ({ onSucces
       streamRef.current = null;
       setCameraStream(null);
     }
+    setIsCameraReady(false);
   };
 
   const handleNextStep1 = () => {
@@ -120,7 +126,7 @@ export const RegistrationWizard: React.FC<RegistrationWizardProps> = ({ onSucces
           await new Promise((r) => setTimeout(r, FRAME_INTERVAL_MS));
         }
 
-        const dataUrl = await captureOnNextDecodedFrame(video, canvas);
+        const dataUrl = await captureWithRetry(video, canvas);
         frames.push(dataUrl);
         setFramesCaptured(i + 1);
       }
@@ -360,13 +366,18 @@ export const RegistrationWizard: React.FC<RegistrationWizardProps> = ({ onSucces
             <button
               id="capture-btn"
               onClick={startSequentialAveraging}
-              disabled={isCapturing}
-              className="w-full h-11 btn-primary rounded-full flex items-center justify-center gap-2 text-xs font-bold"
+              disabled={isCapturing || (!!cameraStream && !isCameraReady)}
+              className="w-full h-11 btn-primary rounded-full flex items-center justify-center gap-2 text-xs font-bold disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isCapturing ? (
                 <>
                   <div className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin"></div>
                   Capturing ({framesCaptured}/5)...
+                </>
+              ) : !!cameraStream && !isCameraReady ? (
+                <>
+                  <div className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin"></div>
+                  Initializing Camera...
                 </>
               ) : (
                 <>
