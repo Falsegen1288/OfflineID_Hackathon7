@@ -13,6 +13,10 @@ export const RegistrationWizard: React.FC<RegistrationWizardProps> = ({ onSucces
   const [step, setStep] = useState<1 | 2 | 3>(1);
   const [name, setName] = useState("");
   const [empCode, setEmpCode] = useState("");
+  const [department, setDepartment] = useState("");
+  const [designation, setDesignation] = useState("");
+  const [email, setEmail] = useState("");
+  const [phone, setPhone] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
 
   const [framesCaptured, setFramesCaptured] = useState(0);
@@ -59,42 +63,36 @@ export const RegistrationWizard: React.FC<RegistrationWizardProps> = ({ onSucces
     setStep(2);
   };
 
-  const captureFrame = () => {
-    if (framesCaptured >= 5) return;
-
-    if (canvasRef.current && videoRef.current && cameraStream) {
-      const canvas = canvasRef.current;
-      const ctx = canvas.getContext("2d");
-      if (ctx) {
-        ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-        setFramesCaptured((prev) => prev + 1);
-        if (framesCaptured === 4) {
-          const dataUrl = canvas.toDataURL("image/jpeg");
-          setCapturedPhoto(dataUrl);
-          stopCamera();
-          setTimeout(() => setStep(3), 800);
-        }
-      }
-    } else {
-      setFramesCaptured((prev) => prev + 1);
-      if (framesCaptured === 4) {
-        setCapturedPhoto(null);
-        setTimeout(() => setStep(3), 800);
-      }
-    }
-  };
-
   const startSequentialAveraging = () => {
     setIsCapturing(true);
     setFramesCaptured(0);
     
     let count = 0;
     const interval = setInterval(() => {
-      captureFrame();
       count++;
+      setFramesCaptured(count);
+      
+      if (canvasRef.current && videoRef.current && streamRef.current) {
+        const canvas = canvasRef.current;
+        const ctx = canvas.getContext("2d");
+        if (ctx) {
+          ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
+          if (count === 5) {
+            const dataUrl = canvas.toDataURL("image/jpeg");
+            setCapturedPhoto(dataUrl);
+          }
+        }
+      } else {
+        if (count === 5) {
+          setCapturedPhoto(null);
+        }
+      }
+      
       if (count >= 5) {
         clearInterval(interval);
         setIsCapturing(false);
+        stopCamera();
+        setTimeout(() => setStep(3), 800);
       }
     }, 400);
   };
@@ -110,7 +108,11 @@ export const RegistrationWizard: React.FC<RegistrationWizardProps> = ({ onSucces
       employee_code: empCode.toUpperCase().startsWith("EMP-") ? empCode.toUpperCase() : "EMP-" + empCode,
       faceprint: encryptedBlob,
       registered_at: Date.now(),
-      registered_by: currentUser
+      registered_by: currentUser,
+      department: department.trim() || undefined,
+      designation: designation.trim() || undefined,
+      email: email.trim() || undefined,
+      phone: phone.trim() || undefined
     };
 
     saveEmployee(newEmployee);
@@ -147,10 +149,10 @@ export const RegistrationWizard: React.FC<RegistrationWizardProps> = ({ onSucces
         {/* Step 1 */}
         {step === 1 && (
           <section id="step-1" className="space-y-5 animate-fade-in">
-            <div className="space-y-4">
+            <div className="space-y-4 max-h-[340px] overflow-y-auto pr-1.5 custom-scrollbar">
               <div className="flex flex-col gap-1">
                 <label className="text-xs font-semibold text-[#414754]" htmlFor="emp-name">
-                  Employee Full Name
+                  Employee Full Name *
                 </label>
                 <input
                   id="emp-name"
@@ -158,13 +160,13 @@ export const RegistrationWizard: React.FC<RegistrationWizardProps> = ({ onSucces
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   placeholder="Enter employee's full name"
-                  className="w-full h-11 px-4 border border-slate-300 rounded-lg bg-white focus:ring-1 focus:ring-[#005bbf] focus:border-[#005bbf] outline-none transition-all text-sm"
+                  className="w-full h-10 px-3 border border-slate-300 rounded-lg bg-white focus:ring-1 focus:ring-[#005bbf] focus:border-[#005bbf] outline-none transition-all text-xs"
                 />
               </div>
 
               <div className="flex flex-col gap-1">
                 <label className="text-xs font-semibold text-[#414754]" htmlFor="emp-code">
-                  Employee Code ID
+                  Employee Code ID *
                 </label>
                 <input
                   id="emp-code"
@@ -172,7 +174,63 @@ export const RegistrationWizard: React.FC<RegistrationWizardProps> = ({ onSucces
                   value={empCode}
                   onChange={(e) => setEmpCode(e.target.value)}
                   placeholder="e.g. EMP-98122"
-                  className="w-full h-11 px-4 border border-slate-300 rounded-lg bg-white focus:ring-1 focus:ring-[#005bbf] focus:border-[#005bbf] outline-none transition-all text-sm uppercase"
+                  className="w-full h-10 px-3 border border-slate-300 rounded-lg bg-white focus:ring-1 focus:ring-[#005bbf] focus:border-[#005bbf] outline-none transition-all text-xs uppercase"
+                />
+              </div>
+
+              <div className="flex flex-col gap-1">
+                <label className="text-xs font-semibold text-[#414754]" htmlFor="emp-dept">
+                  Department (Optional)
+                </label>
+                <input
+                  id="emp-dept"
+                  type="text"
+                  value={department}
+                  onChange={(e) => setDepartment(e.target.value)}
+                  placeholder="e.g. Operations Control"
+                  className="w-full h-10 px-3 border border-slate-300 rounded-lg bg-white focus:ring-1 focus:ring-[#005bbf] focus:border-[#005bbf] outline-none transition-all text-xs"
+                />
+              </div>
+
+              <div className="flex flex-col gap-1">
+                <label className="text-xs font-semibold text-[#414754]" htmlFor="emp-desg">
+                  Designation / Role (Optional)
+                </label>
+                <input
+                  id="emp-desg"
+                  type="text"
+                  value={designation}
+                  onChange={(e) => setDesignation(e.target.value)}
+                  placeholder="e.g. Field Officer"
+                  className="w-full h-10 px-3 border border-slate-300 rounded-lg bg-white focus:ring-1 focus:ring-[#005bbf] focus:border-[#005bbf] outline-none transition-all text-xs"
+                />
+              </div>
+
+              <div className="flex flex-col gap-1">
+                <label className="text-xs font-semibold text-[#414754]" htmlFor="emp-email">
+                  Email Address (Optional)
+                </label>
+                <input
+                  id="emp-email"
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="e.g. name@datalake.org"
+                  className="w-full h-10 px-3 border border-slate-300 rounded-lg bg-white focus:ring-1 focus:ring-[#005bbf] focus:border-[#005bbf] outline-none transition-all text-xs"
+                />
+              </div>
+
+              <div className="flex flex-col gap-1">
+                <label className="text-xs font-semibold text-[#414754]" htmlFor="emp-phone">
+                  Phone Number (Optional)
+                </label>
+                <input
+                  id="emp-phone"
+                  type="text"
+                  value={phone}
+                  onChange={(e) => setPhone(e.target.value)}
+                  placeholder="e.g. +91 98765 43210"
+                  className="w-full h-10 px-3 border border-slate-300 rounded-lg bg-white focus:ring-1 focus:ring-[#005bbf] focus:border-[#005bbf] outline-none transition-all text-xs"
                 />
               </div>
             </div>
@@ -300,16 +358,30 @@ export const RegistrationWizard: React.FC<RegistrationWizardProps> = ({ onSucces
               </div>
 
               {/* Details */}
-              <div className="space-y-1 text-center">
+              <div className="space-y-1 text-center max-h-[140px] overflow-y-auto custom-scrollbar px-1">
                 <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
                   Review Employee Profile
                 </p>
-                <h3 className="text-xl font-extrabold text-[#181c20]" id="display-name">
+                <h3 className="text-lg font-extrabold text-[#181c20]" id="display-name">
                   {name}
                 </h3>
-                <p className="text-sm text-[#005bbf] font-bold" id="display-code">
+                <p className="text-xs text-[#005bbf] font-bold font-mono" id="display-code">
                   {empCodeFormatted}
                 </p>
+                <div className="pt-2 flex flex-wrap gap-1 justify-center text-[10px]">
+                  {department && (
+                    <span className="bg-slate-100 text-slate-700 px-2 py-0.5 rounded font-medium">{department}</span>
+                  )}
+                  {designation && (
+                    <span className="bg-slate-100 text-slate-700 px-2 py-0.5 rounded font-medium">{designation}</span>
+                  )}
+                  {email && (
+                    <span className="bg-slate-100 text-slate-700 px-2 py-0.5 rounded font-mono">{email}</span>
+                  )}
+                  {phone && (
+                    <span className="bg-slate-100 text-slate-700 px-2 py-0.5 rounded font-mono">{phone}</span>
+                  )}
+                </div>
               </div>
 
               {/* Security info */}
@@ -351,6 +423,10 @@ export const RegistrationWizard: React.FC<RegistrationWizardProps> = ({ onSucces
                   setStep(1);
                   setName("");
                   setEmpCode("");
+                  setDepartment("");
+                  setDesignation("");
+                  setEmail("");
+                  setPhone("");
                   setFramesCaptured(0);
                   setCapturedPhoto(null);
                 }}

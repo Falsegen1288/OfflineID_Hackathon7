@@ -10,6 +10,7 @@ interface ActiveScanViewProps {
 
 export const ActiveScanView: React.FC<ActiveScanViewProps> = ({ onSuccess }) => {
   const [employees, setEmployees] = useState<Employee[]>([]);
+  const [selectedSubjectId, setSelectedSubjectId] = useState<string>("");
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [selectedGesture, setSelectedGesture] = useState<GestureChallenge>(GestureChallenge.BLINK);
   const [countdown, setCountdown] = useState(5);
@@ -31,7 +32,11 @@ export const ActiveScanView: React.FC<ActiveScanViewProps> = ({ onSuccess }) => 
   const streamRef = useRef<MediaStream | null>(null);
 
   useEffect(() => {
-    setEmployees(getEmployees());
+    const list = getEmployees();
+    setEmployees(list);
+    if (list.length > 0) {
+      setSelectedSubjectId(list[0].id);
+    }
     resetChallenge();
 
     navigator.mediaDevices
@@ -78,7 +83,13 @@ export const ActiveScanView: React.FC<ActiveScanViewProps> = ({ onSuccess }) => 
     setTimeout(() => {
       const gDone = isTimeout ? false : (simulatedVerdict !== "gesture_fail");
       
-      const res = simulateRecognition("", selectedGesture, gDone, simulatedVerdict || undefined);
+      const res = simulateRecognition(
+        "", 
+        selectedGesture, 
+        gDone, 
+        simulatedVerdict || undefined,
+        selectedSubjectId || undefined
+      );
 
       if (!res.livenessPassed) {
         setScanStatus("failed");
@@ -224,6 +235,27 @@ export const ActiveScanView: React.FC<ActiveScanViewProps> = ({ onSuccess }) => 
         <p className="text-[10px] text-slate-400 mt-1.5 text-center">
           {simulatedVerdict ? `→ ${DEMO_OPTIONS.find(o => o.key === simulatedVerdict)?.desc}` : "→ Randomized live stream"}
         </p>
+        {employees.length > 0 && (
+          <div className="mt-2.5 flex items-center justify-between gap-2 border-t border-white/10 pt-2.5">
+            <span className="text-slate-300 font-bold text-[9px] uppercase tracking-wider">Subject Profile:</span>
+            <select
+              value={selectedSubjectId}
+              onChange={(e) => {
+                setSelectedSubjectId(e.target.value);
+                setSimulatedVerdict("match");
+                setScanStatus("scanning");
+                setCountdown(5);
+              }}
+              className="bg-neutral-800 text-white border border-white/20 rounded px-2 py-1 text-[10px] outline-none max-w-[170px]"
+            >
+              {employees.map((emp) => (
+                <option key={emp.id} value={emp.id}>
+                  {emp.name} ({emp.employee_code})
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
       </div>
 
       {/* Gesture Prompt */}

@@ -4,9 +4,17 @@ import { User, Shield, Lock, LogIn, CloudOff, ShieldCheck } from "lucide-react";
 
 interface LoginViewProps {
   onLoginSuccess: (role: AccessRole, username: string) => void;
+  onRegisterClick: () => void;
+  registrationSuccessMsg?: string | null;
+  clearSuccessMsg?: () => void;
 }
 
-export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
+export const LoginView: React.FC<LoginViewProps> = ({
+  onLoginSuccess,
+  onRegisterClick,
+  registrationSuccessMsg,
+  clearSuccessMsg,
+}) => {
   const [role, setRole] = useState<AccessRole>(AccessRole.EMPLOYEE);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -69,6 +77,20 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
           Secure field operations and identity, even offline.
         </p>
       </div>
+
+      {/* Success banner if redirected from self-registration */}
+      {registrationSuccessMsg && (
+        <div className="bg-emerald-50 text-emerald-800 p-3.5 rounded-xl border border-emerald-100 text-xs font-semibold mt-4 flex items-center justify-between animate-fade-in shadow-sm">
+          <span>{registrationSuccessMsg}</span>
+          <button
+            type="button"
+            onClick={clearSuccessMsg}
+            className="text-emerald-800 hover:text-emerald-950 font-bold ml-2 text-sm leading-none"
+          >
+            ×
+          </button>
+        </div>
+      )}
 
       {/* Credentials Form */}
       <form
@@ -178,6 +200,19 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
             </>
           )}
         </button>
+
+        <div className="text-center mt-1 border-t border-slate-100 pt-3 flex flex-col gap-2">
+          <p className="text-[10px] text-slate-400 font-semibold">New Employee / Not Enrolled?</p>
+          <button
+            id="btn-register-redirect"
+            type="button"
+            onClick={onRegisterClick}
+            disabled={isLoading}
+            className="w-full h-10 border border-[#005bbf]/30 text-[#005bbf] hover:bg-[#005bbf]/5 rounded-lg text-xs font-bold transition-spring active:scale-95 flex items-center justify-center gap-1.5"
+          >
+            Enrol Face & Register
+          </button>
+        </div>
       </form>
 
       {/* Offline badge */}

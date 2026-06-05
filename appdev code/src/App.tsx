@@ -15,9 +15,10 @@ import { SettingsView } from "./components/SettingsView";
 import { Scan, History, RefreshCw, Settings, UserPlus, Signal, Wifi, Battery, ShieldCheck } from "lucide-react";
 
 export default function App() {
-  const [appState, setAppState] = useState<"splash" | "login" | "main">("splash");
+  const [appState, setAppState] = useState<"splash" | "login" | "main" | "register">("splash");
   const [currentRole, setCurrentRole] = useState<AccessRole>(AccessRole.EMPLOYEE);
   const [currentUser, setCurrentUser] = useState<string | null>(null);
+  const [registrationSuccessMsg, setRegistrationSuccessMsg] = useState<string | null>(null);
   
   const [activeTab, setActiveTab] = useState<"scan" | "history" | "sync" | "settings">("scan");
   
@@ -98,7 +99,45 @@ export default function App() {
         )}
 
         {appState === "login" && (
-          <LoginView onLoginSuccess={handleLoginSuccess} />
+          <LoginView
+            onLoginSuccess={handleLoginSuccess}
+            onRegisterClick={() => {
+              setRegistrationSuccessMsg(null);
+              setAppState("register");
+            }}
+            registrationSuccessMsg={registrationSuccessMsg}
+            clearSuccessMsg={() => setRegistrationSuccessMsg(null)}
+          />
+        )}
+
+        {appState === "register" && (
+          <div className="flex-grow flex flex-col justify-stretch h-full bg-[#f7f9ff]">
+            {/* Header for Self-Registration */}
+            <header className="sticky top-0 bg-white/90 backdrop-blur-md border-b border-[#c1c6d6]/60 flex justify-between items-center px-4 h-12 z-20">
+              <div className="flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-full bg-[#005bbf] animate-breathe"></span>
+                <span className="font-bold text-sm tracking-tight text-[#005bbf]">
+                  OfflineID • REGISTER
+                </span>
+              </div>
+              <button
+                onClick={() => setAppState("login")}
+                className="border border-slate-300 text-slate-600 px-2.5 py-1 text-[10px] font-bold rounded-full active:scale-95 transition-spring"
+              >
+                Cancel
+              </button>
+            </header>
+            <div className="flex-grow flex flex-col justify-stretch overflow-hidden">
+              <RegistrationWizard
+                currentUser="Self Registration"
+                onSuccess={() => {
+                  setRegistrationSuccessMsg("Registration successful! You can now log in using your credentials.");
+                  setAppState("login");
+                  reloadDatabaseStates();
+                }}
+              />
+            </div>
+          </div>
         )}
 
         {appState === "main" && (

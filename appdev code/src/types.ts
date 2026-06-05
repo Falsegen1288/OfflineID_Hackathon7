@@ -10,7 +10,12 @@ export interface Employee {
   faceprint: string; // Base64 of encrypted 512-float array
   registered_at: number; // Unix ms
   registered_by: string;
+  department?: string;
+  designation?: string;
+  email?: string;
+  phone?: string;
 }
+
 
 export interface AttendanceLog {
   id: string; // UUID

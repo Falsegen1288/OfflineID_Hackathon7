@@ -47,7 +47,8 @@ export function simulateRecognition(
   inputImgBase64: string, 
   requiredGesture: GestureChallenge, 
   gestureCompleted: boolean,
-  forceStatus?: "match" | "no_match" | "spoof" | "gesture_fail"
+  forceStatus?: "match" | "no_match" | "spoof" | "gesture_fail",
+  simulatedSubjectId?: string
 ): RecognitionResult {
   
   // 1. Gesture Challenge validation (e.g. blink, smile etc.)
@@ -76,7 +77,7 @@ export function simulateRecognition(
     };
   }
 
-  // 3. Identification
+  // 3. Identification (Real Cosine Similarity Search)
   const employees = getEmployees();
   if (employees.length === 0 || forceStatus === "no_match") {
     return {
@@ -88,35 +89,50 @@ export function simulateRecognition(
     };
   }
 
-  // Pick match based on simulator state
+  // Generate captured embedding based on simulated subject faceprint
+  let capturedEmbedding = new Float32Array(512);
   const key = getOrCreateSecureKey();
+
+  const subjectId = simulatedSubjectId || employees[0].id;
+  const subject = employees.find(e => e.id === subjectId) || employees[0];
+
+  if (subject && subject.faceprint) {
+    const dec = decryptFaceprint(subject.faceprint, key);
+    // Add tiny random noise to simulate camera/capture variance
+    capturedEmbedding = new Float32Array(512).map((_, i) => {
+      const noise = (Math.random() - 0.5) * 0.04;
+      return dec[i] + noise;
+    });
+  } else {
+    capturedEmbedding = handleFiveFrameAveraging();
+  }
+
+  // Search local storage
   let bestMatch: Employee | null = null;
   let highestSimilarity = 0;
 
-  // Let's create a simulated face capture search
-  if (forceStatus === "match") {
-    // Force first employee or random match
-    bestMatch = employees[0];
-    highestSimilarity = Math.random() * 0.05 + 0.94; // high match rate
-  } else {
-    // Normal simulator pass: 70% chance to match the first user (for smooth default scanning experience)
-    const matchesUser = Math.random() > 0.3;
-    if (matchesUser) {
-      bestMatch = employees[Math.floor(Math.random() * employees.length)];
-      highestSimilarity = Math.random() * 0.15 + 0.78; // above 0.65 threshold
-    } else {
-      bestMatch = employees[0];
-      highestSimilarity = Math.random() * 0.15 + 0.45; // lower than 0.65 similarity
+  for (const emp of employees) {
+    if (!emp.faceprint) continue;
+    const empEmbedding = decryptFaceprint(emp.faceprint, key);
+    const sim = cosineSimilarity(capturedEmbedding, empEmbedding);
+    if (sim > highestSimilarity) {
+      highestSimilarity = sim;
+      bestMatch = emp;
     }
   }
 
-  if (highestSimilarity > 0.65) {
+  // If forceStatus is "match", force similarity high
+  if (forceStatus === "match" && bestMatch) {
+    highestSimilarity = Math.max(highestSimilarity, Math.random() * 0.05 + 0.92);
+  }
+
+  if (highestSimilarity > 0.65 && bestMatch) {
     return {
       livenessPassed: true,
       livenessScore: liveness.score,
       matchedEmployee: bestMatch,
       confidence: highestSimilarity,
-      message: `Access verified. Match found: ${bestMatch.name} with similarity metric ${highestSimilarity.toFixed(3)}.`
+      message: `Access verified. Match found: ${bestMatch.name} (Code: ${bestMatch.employee_code}) with similarity metric ${highestSimilarity.toFixed(3)}.`
     };
   } else {
     return {

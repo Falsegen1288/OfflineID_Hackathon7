@@ -62,7 +62,11 @@ export const INITIAL_EMPLOYEES: Employee[] = [
     employee_code: "EMP-482019",
     faceprint: "", // populated at runtime programmatically
     registered_at: Date.now() - 3600000 * 20,
-    registered_by: "Admin"
+    registered_by: "Admin",
+    department: "Logistics & Supply",
+    designation: "Fleet Coordinator",
+    email: "m.chen@datalake.org",
+    phone: "+91 98765 43210"
   },
   {
     id: "emp-02",
@@ -70,7 +74,11 @@ export const INITIAL_EMPLOYEES: Employee[] = [
     employee_code: "EMP-482015",
     faceprint: "",
     registered_at: Date.now() - 3600000 * 18,
-    registered_by: "Admin"
+    registered_by: "Admin",
+    department: "Field Security",
+    designation: "Security Supervisor",
+    email: "s.jenkins@datalake.org",
+    phone: "+91 98765 43211"
   },
   {
     id: "emp-03",
@@ -78,7 +86,11 @@ export const INITIAL_EMPLOYEES: Employee[] = [
     employee_code: "EMP-481992",
     faceprint: "",
     registered_at: Date.now() - 3600000 * 15,
-    registered_by: "Admin"
+    registered_by: "Admin",
+    department: "Engineering & IT",
+    designation: "Systems Engineer",
+    email: "d.wilson@datalake.org",
+    phone: "+91 98765 43212"
   },
   {
     id: "emp-04",
@@ -86,7 +98,11 @@ export const INITIAL_EMPLOYEES: Employee[] = [
     employee_code: "EMP-482031",
     faceprint: "",
     registered_at: Date.now() - 3600000 * 12,
-    registered_by: "Admin"
+    registered_by: "Admin",
+    department: "Operations Control",
+    designation: "Duty Manager",
+    email: "e.rodriguez@datalake.org",
+    phone: "+91 98765 43213"
   },
   {
     id: "emp-05",
@@ -94,7 +110,11 @@ export const INITIAL_EMPLOYEES: Employee[] = [
     employee_code: "EMP-481855",
     faceprint: "",
     registered_at: Date.now() - 3600000 * 48,
-    registered_by: "Admin"
+    registered_by: "Admin",
+    department: "Field Security",
+    designation: "Patrol Officer",
+    email: "r.miller@datalake.org",
+    phone: "+91 98765 43214"
   }
 ];
 
