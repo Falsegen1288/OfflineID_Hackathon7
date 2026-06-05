@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
-import { Employee } from "../types";
-import { getOrCreateSecureKey, encryptFaceprint, saveEmployee } from "../database/db";
-import { handleFiveFrameAveraging } from "../ml/pipeline";
+import { Employee, FaceEmbedding } from "../types";
+import { getOrCreateSecureKey, encryptFaceprint, saveEmployee, saveEmployeeAsync } from "../database/db";
+import { handleFiveFrameAveraging, extractPixelEmbedding } from "../ml/pipeline";
 import { ArrowRight, Camera, CheckCircle2, AlertCircle } from "lucide-react";
 import { startCamera, waitForVideoReady, captureWithRetry } from "../utils/camera";
 
@@ -42,6 +42,11 @@ type GestureId = typeof GESTURE_SEQUENCE[number]['id'];
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+const l2Normalize = (v: number[]): number[] => {
+  const norm = Math.sqrt(v.reduce((s, x) => s + x * x, 0)) + 1e-10;
+  return v.map(x => x / norm);
+};
+
 interface RegistrationWizardProps {
   onSuccess: () => void;
   currentUser: string;
@@ -70,6 +75,7 @@ export const RegistrationWizard: React.FC<RegistrationWizardProps> = ({ onSucces
   const [currentGestureIndex, setCurrentGestureIndex] = useState(0);
   const [gesturePhase, setGesturePhase] = useState<'instruction' | 'countdown' | 'capturing' | 'done'>('instruction');
   const [countdown, setCountdown] = useState(3);
+  const [capturedEmbeddings, setCapturedEmbeddings] = useState<FaceEmbedding[]>([]);
 
   useEffect(() => {
     let active = true;
@@ -142,6 +148,7 @@ export const RegistrationWizard: React.FC<RegistrationWizardProps> = ({ onSucces
     setErrorMsg("");
 
     const frames: string[] = [];
+    const collectedEmbeddings: FaceEmbedding[] = [];
 
     try {
       for (let i = 0; i < GESTURE_SEQUENCE.length; i++) {
@@ -164,12 +171,27 @@ export const RegistrationWizard: React.FC<RegistrationWizardProps> = ({ onSucces
         await delay(gesture.holdMs); // wait for user to hold the gesture
 
         let dataUrl: string | null = null;
+        let vector: number[] | null = null;
+
         if (cameraStream && videoRef.current && canvasRef.current) {
           dataUrl = await captureWithRetry(videoRef.current, canvasRef.current);
-          frames.push(dataUrl);
+          if (dataUrl) {
+            frames.push(dataUrl);
+            vector = extractPixelEmbedding(canvasRef.current);
+          }
         } else {
           // Simulator fallback
           await delay(300);
+          const rawVec = new Array(512).fill(0).map(() => Math.random());
+          vector = l2Normalize(rawVec);
+        }
+
+        if (vector) {
+          collectedEmbeddings.push({
+            vector,
+            gestureId: gesture.id,
+            capturedAt: Date.now()
+          });
         }
         
         setFramesCaptured(i + 1);
@@ -177,6 +199,7 @@ export const RegistrationWizard: React.FC<RegistrationWizardProps> = ({ onSucces
       }
 
       setGesturePhase('done');
+      setCapturedEmbeddings(collectedEmbeddings);
       
       if (frames.length > 0) {
         const lastDataUrl = frames[frames.length - 1];
@@ -195,26 +218,37 @@ export const RegistrationWizard: React.FC<RegistrationWizardProps> = ({ onSucces
     }
   }, [cameraStream]);
 
-  const handleFinalRegister = () => {
-    const key = getOrCreateSecureKey();
-    const averagedEmbedding = handleFiveFrameAveraging();
-    const encryptedBlob = encryptFaceprint(averagedEmbedding, key);
+  const handleFinalRegister = async () => {
+    try {
+      // Average the gesture embeddings, re-normalize
+      const sumVec = new Array(512).fill(0);
+      for (const e of capturedEmbeddings) {
+        e.vector.forEach((v, i) => { sumVec[i] += v; });
+      }
+      const masterEmbedding = l2Normalize(sumVec.map(v => v / (capturedEmbeddings.length || 1)));
 
-    const newEmployee: Employee = {
-      id: "emp-" + Math.random().toString(36).substr(2, 9),
-      name,
-      employee_code: empCode.toUpperCase().startsWith("EMP-") ? empCode.toUpperCase() : "EMP-" + empCode,
-      faceprint: encryptedBlob,
-      registered_at: Date.now(),
-      registered_by: currentUser,
-      department: department.trim() || undefined,
-      designation: designation.trim() || undefined,
-      email: email.trim() || undefined,
-      phone: phone.trim() || undefined
-    };
+      const newEmployee: Employee = {
+        id: "emp-" + Math.random().toString(36).substr(2, 9),
+        name,
+        employee_code: empCode.toUpperCase().startsWith("EMP-") ? empCode.toUpperCase() : "EMP-" + empCode,
+        faceprint: "", // legacy placeholder
+        registered_at: Date.now(),
+        registered_by: currentUser,
+        department: department.trim() || undefined,
+        designation: designation.trim() || undefined,
+        email: email.trim() || undefined,
+        phone: phone.trim() || undefined,
+        avatarDataUrl: capturedPhoto || undefined,
+        embeddings: capturedEmbeddings,
+        masterEmbedding
+      };
 
-    saveEmployee(newEmployee);
-    onSuccess();
+      await saveEmployeeAsync(newEmployee);
+      onSuccess();
+    } catch (err: any) {
+      console.error("Failed to register employee:", err);
+      setErrorMsg(err.message || "Failed to encrypt and write employee profile.");
+    }
   };
 
   const empCodeFormatted = empCode.toUpperCase().startsWith("EMP-") ? empCode.toUpperCase() : "EMP-" + empCode.toUpperCase();

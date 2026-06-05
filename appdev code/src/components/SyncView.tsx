@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
-import { getAttendanceLogs, updateAttendanceLogSyncStatus } from "../database/db";
+import { getAttendanceLogsAsync, updateAttendanceLogSyncStatusAsync } from "../database/db";
 import { Cloud, CloudOff, RefreshCw, Smartphone, Database, CheckSquare, Clock } from "lucide-react";
+import { AttendanceLog } from "../types";
 
 interface SyncViewProps {
   logsVersion: number;
@@ -15,13 +16,21 @@ export const SyncView: React.FC<SyncViewProps> = ({
   networkStatus,
   setNetworkStatus
 }) => {
-  const [logs, setLogs] = useState(getAttendanceLogs());
+  const [logs, setLogs] = useState<AttendanceLog[]>([]);
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncPercentage, setSyncPercentage] = useState(0);
   const [lastSyncTime, setLastSyncTime] = useState<string>("5 mins ago");
 
   useEffect(() => {
-    setLogs(getAttendanceLogs());
+    let active = true;
+    getAttendanceLogsAsync().then((list) => {
+      if (active) {
+        setLogs(list);
+      }
+    });
+    return () => {
+      active = false;
+    };
   }, [logsVersion]);
 
   const totalLogs = logs.length;
@@ -41,14 +50,14 @@ export const SyncView: React.FC<SyncViewProps> = ({
     setSyncPercentage(0);
 
     let current = 0;
-    const interval = setInterval(() => {
+    const interval = setInterval(async () => {
       current += 4;
       if (current >= 100) {
         current = 100;
         clearInterval(interval);
         
         const pendingIds = logs.filter((l) => l.synced === 0).map((l) => l.id);
-        updateAttendanceLogSyncStatus(pendingIds, 1, 1);
+        await updateAttendanceLogSyncStatusAsync(pendingIds, 1, 1);
         
         setTimeout(() => {
           setIsSyncing(false);

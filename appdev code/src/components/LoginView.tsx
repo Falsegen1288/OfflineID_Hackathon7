@@ -1,9 +1,24 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { AccessRole, Employee, AttendanceLog, GestureChallenge } from "../types";
-import { getEmployees, saveAttendanceLog, getOrCreateSecureKey, decryptFaceprint } from "../database/db";
-import { simulateRecognition } from "../ml/pipeline";
+import { getEmployees, getEmployeesAsync, saveAttendanceLog, saveAttendanceLogAsync, getOrCreateSecureKey, decryptFaceprint } from "../database/db";
+import { simulateRecognition, extractPixelEmbedding, matchEmployeeAsync } from "../ml/pipeline";
 import { User, Shield, Lock, LogIn, CloudOff, ShieldCheck, Camera, CheckCircle2, AlertTriangle, ArrowRight, UserPlus } from "lucide-react";
-import { startCamera, waitForVideoReady } from "../utils/camera";
+import { startCamera, waitForVideoReady, captureWithRetry } from "../utils/camera";
+
+const GESTURE_SEQUENCE = [
+  { id: 'still', instruction: 'Hold still and look at the camera', icon: '🎯', holdMs: 2000 },
+  { id: 'turn_right', instruction: 'Slowly turn your head to the right', icon: '➡️', holdMs: 2500 },
+  { id: 'turn_left', instruction: 'Slowly turn your head to the left', icon: '⬅️', holdMs: 2500 },
+  { id: 'blink', instruction: 'Blink your eyes naturally', icon: '👁️', holdMs: 3000 },
+  { id: 'smile', instruction: 'Give a natural smile', icon: '😊', holdMs: 2000 },
+] as const;
+
+const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+const l2Normalize = (v: number[]): number[] => {
+  const norm = Math.sqrt(v.reduce((s, x) => s + x * x, 0)) + 1e-10;
+  return v.map(x => x / norm);
+};
 
 interface LoginViewProps {
   onLoginSuccess: (role: AccessRole, username: string) => void;
@@ -43,6 +58,12 @@ export const LoginView: React.FC<LoginViewProps> = ({
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
+  // ── Gesture Login Scan States
+  const [currentGestureIndex, setCurrentGestureIndex] = useState(0);
+  const [gesturePhase, setGesturePhase] = useState<'instruction' | 'countdown' | 'capturing' | 'done'>('instruction');
+  const [isCapturing, setIsCapturing] = useState(false);
+  const [framesCaptured, setFramesCaptured] = useState(0);
+
   // ── Password Admin States ──────────────────────────────────────────
   const [adminRole, setAdminRole] = useState<AccessRole>(AccessRole.ADMIN);
   const [adminUsername, setAdminUsername] = useState("");
@@ -61,11 +82,13 @@ export const LoginView: React.FC<LoginViewProps> = ({
       return;
     }
 
-    const list = getEmployees();
-    setEmployees(list);
-    if (list.length > 0) {
-      setSelectedSubjectId(list[0].id);
-    }
+    getEmployeesAsync().then((list) => {
+      if (!active) return;
+      setEmployees(list);
+      if (list.length > 0) {
+        setSelectedSubjectId(list[0].id);
+      }
+    });
     resetChallenge();
     setCameraError(null);
 
@@ -108,17 +131,6 @@ export const LoginView: React.FC<LoginViewProps> = ({
     };
   }, [subMode, cameraRetryCount]);
 
-  // ── Countdown Timer Effect ─────────────────────────────────────────
-  useEffect(() => {
-    if (subMode !== "face" || scanStatus !== "scanning") return;
-    if (countdown <= 0) {
-      evaluateChallenge(true);
-      return;
-    }
-    const timer = setTimeout(() => setCountdown((prev) => prev - 1), 1000);
-    return () => clearTimeout(timer);
-  }, [countdown, scanStatus, subMode]);
-
   const stopCamera = () => {
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
@@ -128,23 +140,77 @@ export const LoginView: React.FC<LoginViewProps> = ({
   };
 
   const resetChallenge = () => {
-    const gestures = [GestureChallenge.BLINK, GestureChallenge.SMILE, GestureChallenge.TURN_LEFT, GestureChallenge.TURN_RIGHT];
-    setSelectedGesture(gestures[Math.floor(Math.random() * gestures.length)]);
-    setCountdown(5);
+    setCountdown(3);
+    setFramesCaptured(0);
+    setCurrentGestureIndex(0);
+    setGesturePhase('instruction');
     setScanStatus("scanning");
     setMatchResult(null);
+    setIsCapturing(false);
   };
 
-  const evaluateChallenge = (isTimeout = false) => {
-    setScanStatus("processing");
-    
-    setTimeout(() => {
-      const gDone = isTimeout ? false : (simulatedVerdict !== "gesture_fail");
+  const runGestureLoginSequence = useCallback(async () => {
+    setIsCapturing(true);
+    setFramesCaptured(0);
+    setScanStatus("scanning");
+    setMatchResult(null);
+
+    const queryEmbeddings: number[][] = [];
+
+    try {
+      for (let i = 0; i < GESTURE_SEQUENCE.length; i++) {
+        const gesture = GESTURE_SEQUENCE[i];
+
+        // Phase 1: Show instruction
+        setCurrentGestureIndex(i);
+        setGesturePhase('instruction');
+        await delay(1800); // user reads the instruction
+
+        // Phase 2: Countdown
+        setGesturePhase('countdown');
+        for (let c = 3; c >= 1; c--) {
+          setCountdown(c);
+          await delay(700);
+        }
+
+        // Phase 3: Capture the frame
+        setGesturePhase('capturing');
+        await delay(gesture.holdMs); // wait for user to hold the gesture
+
+        let vector: number[] | null = null;
+        if (stream && videoRef.current) {
+          const tempCanvas = document.createElement("canvas");
+          tempCanvas.width = videoRef.current.videoWidth || 400;
+          tempCanvas.height = videoRef.current.videoHeight || 500;
+          const dataUrl = await captureWithRetry(videoRef.current, tempCanvas);
+          if (dataUrl) {
+            vector = extractPixelEmbedding(tempCanvas);
+          }
+        } else {
+          // Simulator fallback
+          await delay(300);
+          const rawVec = new Array(512).fill(0).map(() => Math.random());
+          vector = l2Normalize(rawVec);
+        }
+
+        if (vector) {
+          queryEmbeddings.push(vector);
+        }
+
+        setFramesCaptured(i + 1);
+        await delay(400);
+      }
+
+      setGesturePhase('done');
+      setIsCapturing(false);
+      setScanStatus("processing");
       
-      const res = simulateRecognition(
-        "", 
-        selectedGesture, 
-        gDone, 
+      const requiredGesture = GestureChallenge.BLINK; // fallback info log
+      
+      const res = await matchEmployeeAsync(
+        queryEmbeddings,
+        requiredGesture,
+        simulatedVerdict !== "gesture_fail",
         simulatedVerdict || undefined,
         selectedSubjectId || undefined
       );
@@ -158,7 +224,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
           confidence: 0,
           score: res.livenessScore,
           passed: false,
-          gestureCompleted: gDone,
+          gestureCompleted: true,
           message: res.message
         });
       } else if (res.matchedEmployee === null) {
@@ -170,7 +236,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
           confidence: res.confidence,
           score: res.livenessScore,
           passed: true,
-          gestureCompleted: gDone,
+          gestureCompleted: true,
           message: res.message
         });
       } else {
@@ -182,11 +248,11 @@ export const LoginView: React.FC<LoginViewProps> = ({
           confidence: res.confidence,
           score: res.livenessScore,
           passed: true,
-          gestureCompleted: gDone,
+          gestureCompleted: true,
           message: res.message
         });
 
-        // Write attendance log to localStorage
+        // Write attendance log
         const newLog: AttendanceLog = {
           id: "log-" + Math.random().toString(36).substr(2, 9),
           employee_id: res.matchedEmployee.id,
@@ -194,19 +260,32 @@ export const LoginView: React.FC<LoginViewProps> = ({
           employee_code: res.matchedEmployee.employee_code,
           timestamp: Date.now(),
           confidence: res.confidence,
-          gesture_used: selectedGesture.charAt(0) + selectedGesture.slice(1).toLowerCase().replace("_", " "),
+          gesture_used: "Multi-Gesture Liveness Scan",
           synced: 0,
           purged: 0
         };
-        saveAttendanceLog(newLog);
+        await saveAttendanceLogAsync(newLog);
 
-        // Transition to main dashboard as authenticated Employee after a short delay
         setTimeout(() => {
           onLoginSuccess(AccessRole.EMPLOYEE, res.matchedEmployee!.name);
         }, 1800);
       }
-    }, 850);
-  };
+    } catch (err: any) {
+      console.error("Biometric matching error:", err);
+      setScanStatus("failed");
+      setMatchResult({
+        employeeName: "Internal Error",
+        employeeCode: "MATCH_FAILED",
+        employeeId: "error",
+        confidence: 0,
+        score: 0,
+        passed: false,
+        gestureCompleted: false,
+        message: err.message || "Failed to process face scans."
+      });
+      setIsCapturing(false);
+    }
+  }, [stream, selectedSubjectId, simulatedVerdict]);
 
   // ── Password Form Submit ───────────────────────────────────────────
   const handlePasswordSubmit = (e: React.FormEvent) => {
@@ -334,7 +413,9 @@ export const LoginView: React.FC<LoginViewProps> = ({
               autoPlay
               playsInline
               muted
-              className={`w-full h-full object-cover scale-x-[-1] ${stream ? "block" : "hidden"}`}
+              className={`w-full h-full object-cover scale-x-[-1] transition-opacity duration-300 ${
+                stream ? "opacity-100" : "opacity-0"
+              }`}
             />
             {!stream && cameraError ? (
               <div className="w-full h-full absolute inset-0 bg-gradient-to-br from-slate-900 via-slate-800 to-slate-950 flex flex-col items-center justify-center text-center p-4 z-10 animate-fade-in">
@@ -363,6 +444,67 @@ export const LoginView: React.FC<LoginViewProps> = ({
               </div>
             ) : null}
 
+            {/* Gesture UI Overlay */}
+            {stream && scanStatus === "scanning" && (
+              <div className="absolute inset-x-0 top-4 flex flex-col items-center z-20 px-4">
+                {/* Gesture instruction card */}
+                <div className="bg-black/70 backdrop-blur-sm rounded-2xl px-5 py-3 flex items-center gap-3 border border-white/10">
+                  <span className="text-2xl">{GESTURE_SEQUENCE[currentGestureIndex].icon}</span>
+                  <span className="text-white text-sm font-medium text-center">
+                    {GESTURE_SEQUENCE[currentGestureIndex].instruction}
+                  </span>
+                </div>
+
+                {/* Countdown pulse ring */}
+                {gesturePhase === 'countdown' && (
+                  <div className="mt-3 w-12 h-12 rounded-full border-4 border-blue-400 flex items-center justify-center animate-pulse bg-black/40">
+                    <span className="text-white text-lg font-bold">{countdown}</span>
+                  </div>
+                )}
+
+                {/* Capturing flash indicator */}
+                {gesturePhase === 'capturing' && (
+                  <div className="mt-3 px-3 py-1 bg-green-500/80 rounded-full">
+                    <span className="text-white text-xs font-semibold tracking-wider">
+                      ● CAPTURING
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {scanStatus === "processing" && (
+              <div className="absolute inset-0 bg-black/70 flex flex-col items-center justify-center gap-2 z-20">
+                <div className="w-8 h-8 border-3 border-[#005bbf]/40 border-t-[#005bbf] rounded-full animate-spin"></div>
+                <p className="text-xs font-semibold text-slate-300 font-medium">Searching Offline Database...</p>
+                <div className="flex gap-1 mt-1">
+                  {["SCRFD", "FASNet", "ArcFace"].map((step) => (
+                    <span key={step} className="text-[8px] font-bold px-2 py-0.5 rounded-full bg-[#005bbf]/20 text-[#60a5fa]">
+                      {step}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Frame progress dots at bottom */}
+            {stream && scanStatus === "scanning" && (
+              <div className="absolute bottom-4 inset-x-0 flex justify-center gap-2 z-20">
+                {GESTURE_SEQUENCE.map((g, i) => (
+                  <div
+                    key={g.id}
+                    className={`w-2 h-2 rounded-full transition-all duration-300 ${
+                      i < framesCaptured
+                        ? 'bg-green-400 scale-125'
+                        : i === currentGestureIndex
+                        ? 'bg-blue-400 animate-pulse'
+                        : 'bg-white/30'
+                    }`}
+                  />
+                ))}
+              </div>
+            )}
+
             {/* Oval Cutout Overlay */}
             <div className="absolute inset-0 bg-black/60 pointer-events-none"
               style={{
@@ -375,27 +517,6 @@ export const LoginView: React.FC<LoginViewProps> = ({
               <div className={`w-[60%] h-[72%] border-2 border-dashed rounded-[100%] transition-colors duration-300 ${
                 scanStatus === "result" ? "border-emerald-400 scan-guide-success" : scanStatus === "failed" ? "border-red-400 animate-shake" : "border-white/60 animate-breathe"
               }`}></div>
-            </div>
-
-            {/* Gesture Prompt Layer */}
-            <div className="absolute inset-x-0 top-[40%] flex flex-col items-center justify-center pointer-events-none p-4">
-              {scanStatus === "scanning" && (
-                <div className="glass-dark px-4 py-2 rounded-xl text-center shadow-lg animate-fade-in flex flex-col items-center gap-1.5">
-                  <p className="text-xs font-extrabold tracking-wide uppercase text-white animate-breathe">
-                    Please {gestureLabel}
-                  </p>
-                  <div className="w-7 h-7 rounded-full border border-white/60 flex items-center justify-center bg-black/40">
-                    <span className="text-[10px] font-extrabold text-white">{countdown}s</span>
-                  </div>
-                </div>
-              )}
-
-              {scanStatus === "processing" && (
-                <div className="glass-dark px-4 py-3 rounded-xl flex flex-col items-center gap-1.5 shadow-lg">
-                  <div className="w-5 h-5 border-2 border-white/40 border-t-white rounded-full animate-spin"></div>
-                  <p className="text-[10px] font-bold text-slate-300">Searching Offline Database...</p>
-                </div>
-              )}
             </div>
 
             {/* Result Popups */}
@@ -428,7 +549,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
                 <p className="text-[10px] text-slate-300 px-4 mt-1 leading-normal">{matchResult.message}</p>
                 <button
                   onClick={resetChallenge}
-                  className="mt-4 bg-red-600 hover:bg-red-700 text-white px-4 py-1.5 rounded-full text-[10px] font-bold active:scale-95 transition-spring"
+                  className="mt-4 bg-red-600 hover:bg-red-700 text-white px-4 py-1.5 rounded-full text-[10px] font-bold active:scale-95 transition-spring cursor-pointer"
                 >
                   Try Again
                 </button>
@@ -440,11 +561,12 @@ export const LoginView: React.FC<LoginViewProps> = ({
           <div className="space-y-2.5">
             {scanStatus === "scanning" && (
               <button
-                onClick={() => evaluateChallenge(false)}
-                className="w-full h-11 btn-primary rounded-full flex items-center justify-center gap-2 text-xs font-bold shadow-md"
+                onClick={runGestureLoginSequence}
+                disabled={isCapturing}
+                className="w-full h-11 btn-primary rounded-full flex items-center justify-center gap-2 text-xs font-bold shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <Camera className="w-4 h-4" />
-                Authenticate Face
+                Start Liveness Scan
               </button>
             )}
 

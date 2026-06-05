@@ -1,4 +1,5 @@
-import { Employee, AttendanceLog, SyncQueueEntry } from "../types";
+import { Employee, AttendanceLog, SyncQueueEntry, FaceEmbedding } from "../types";
+import { getOrCreateSessionKey, encryptRecord, decryptRecord } from "../utils/crypto";
 
 // Simulated Secure Keystore (Keychain / keystore)
 const KEYCHAIN_KEY = "offlineid_aes_key";
@@ -176,12 +177,253 @@ export const INITIAL_LOGS: AttendanceLog[] = [
   }
 ];
 
+function l2Normalize(v: number[]): number[] {
+  const norm = Math.sqrt(v.reduce((s, x) => s + x * x, 0)) + 1e-10;
+  return v.map(x => x / norm);
+}
+
 // Helper to seed localStorage databases
+export async function initializeStorageAsync() {
+  const sessionKey = await getOrCreateSessionKey();
+  
+  if (!localStorage.getItem("offlineid:employees:index")) {
+    const index: string[] = [];
+    const seededEmployees = INITIAL_EMPLOYEES.map((emp, idx) => {
+      // Create simulated embeddings
+      const GESTURE_IDS = ['still', 'turn_right', 'turn_left', 'blink', 'smile'];
+      const embeddings: FaceEmbedding[] = GESTURE_IDS.map((gid) => {
+        const vector = new Array(512).fill(0).map(() => Math.random() * 0.1 + (idx * 0.05));
+        return {
+          vector: l2Normalize(vector),
+          gestureId: gid,
+          capturedAt: Date.now()
+        };
+      });
+
+      const sumVec = new Array(512).fill(0);
+      for (const e of embeddings) {
+        e.vector.forEach((v, i) => { sumVec[i] += v; });
+      }
+      const masterEmbedding = l2Normalize(sumVec.map(v => v / embeddings.length));
+
+      return {
+        ...emp,
+        embeddings,
+        masterEmbedding,
+        registered_at: Date.now() - 3600000 * (20 - idx),
+        loginCount: 0
+      };
+    });
+
+    for (const emp of seededEmployees) {
+      index.push(emp.employee_code);
+      const encrypted = await encryptRecord(sessionKey, emp);
+      localStorage.setItem(`offlineid:employee:${emp.employee_code}`, encrypted);
+    }
+    localStorage.setItem("offlineid:employees:index", JSON.stringify(index));
+  }
+
+  if (!localStorage.getItem("offlineid_attendance_logs")) {
+    localStorage.setItem("offlineid_attendance_logs", JSON.stringify(INITIAL_LOGS));
+  }
+
+  if (!localStorage.getItem("offlineid_sync_queue")) {
+    localStorage.setItem("offlineid_sync_queue", JSON.stringify([]));
+  }
+}
+
+export async function getEmployeesAsync(): Promise<Employee[]> {
+  await initializeStorageAsync();
+  const indexRaw = localStorage.getItem("offlineid:employees:index");
+  if (!indexRaw) return [];
+  
+  const index: string[] = JSON.parse(indexRaw);
+  const sessionKey = await getOrCreateSessionKey();
+  
+  const list: Employee[] = [];
+  for (const code of index) {
+    const encrypted = localStorage.getItem(`offlineid:employee:${code}`);
+    if (!encrypted) continue;
+    try {
+      const emp = await decryptRecord<Employee>(sessionKey, encrypted);
+      list.push(emp);
+    } catch (e) {
+      console.error(`Failed to decrypt record for ${code}`, e);
+    }
+  }
+  return list;
+}
+
+export async function saveEmployeeAsync(employee: Employee): Promise<void> {
+  const sessionKey = await getOrCreateSessionKey();
+  
+  // Encrypt and save
+  const encrypted = await encryptRecord(sessionKey, employee);
+  localStorage.setItem(`offlineid:employee:${employee.employee_code}`, encrypted);
+  
+  // Update index
+  const indexRaw = localStorage.getItem("offlineid:employees:index");
+  const index: string[] = indexRaw ? JSON.parse(indexRaw) : [];
+  if (!index.includes(employee.employee_code)) {
+    index.push(employee.employee_code);
+    localStorage.setItem("offlineid:employees:index", JSON.stringify(index));
+  }
+}
+
+export async function getAttendanceLogsAsync(): Promise<AttendanceLog[]> {
+  await initializeStorageAsync();
+  const sessionKey = await getOrCreateSessionKey();
+  const list: AttendanceLog[] = [];
+  
+  // Process daily encrypted blocks
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (key && key.startsWith("offlineid:attendance:")) {
+      const encrypted = localStorage.getItem(key);
+      if (encrypted) {
+        try {
+          const logs = await decryptRecord<AttendanceLog[]>(sessionKey, encrypted);
+          list.push(...logs);
+        } catch (e) {
+          console.error(`Failed to decrypt attendance log for key ${key}`, e);
+        }
+      }
+    }
+  }
+  
+  // Mix in legacy unencrypted logs if they exist
+  const legacyRaw = localStorage.getItem("offlineid_attendance_logs");
+  if (legacyRaw) {
+    try {
+      const legacyLogs = JSON.parse(legacyRaw) as AttendanceLog[];
+      list.push(...legacyLogs);
+    } catch (e) {
+      console.error("Failed to parse legacy attendance logs", e);
+    }
+  }
+  
+  // Filter duplicates (by ID) and sort descending by timestamp
+  const seenIds = new Set<string>();
+  const uniqueList = list.filter(l => {
+    if (seenIds.has(l.id)) return false;
+    seenIds.add(l.id);
+    return true;
+  });
+
+  return uniqueList.sort((a, b) => b.timestamp - a.timestamp);
+}
+
+export async function saveAttendanceLogAsync(log: AttendanceLog): Promise<void> {
+  const sessionKey = await getOrCreateSessionKey();
+  const dateStr = new Date(log.timestamp).toISOString().split('T')[0];
+  const key = `offlineid:attendance:${dateStr}`;
+  
+  let list: AttendanceLog[] = [];
+  const existing = localStorage.getItem(key);
+  if (existing) {
+    try {
+      list = await decryptRecord<AttendanceLog[]>(sessionKey, existing);
+    } catch {
+      list = [];
+    }
+  }
+  
+  list.unshift(log); // newest first
+  const encrypted = await encryptRecord(sessionKey, list);
+  localStorage.setItem(key, encrypted);
+}
+
+export async function updateAttendanceLogSyncStatusAsync(logIds: string[], synced: number, purged: number): Promise<void> {
+  const sessionKey = await getOrCreateSessionKey();
+  
+  // Update in daily encrypted blocks
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (key && key.startsWith("offlineid:attendance:")) {
+      const encrypted = localStorage.getItem(key);
+      if (encrypted) {
+        try {
+          const logs = await decryptRecord<AttendanceLog[]>(sessionKey, encrypted);
+          let modified = false;
+          const updated = logs.map(l => {
+            if (logIds.includes(l.id)) {
+              modified = true;
+              return { ...l, synced, purged };
+            }
+            return l;
+          });
+          if (modified) {
+            const nextEncrypted = await encryptRecord(sessionKey, updated);
+            localStorage.setItem(key, nextEncrypted);
+          }
+        } catch (e) {
+          console.error(`Failed to update attendance log sync for key ${key}`, e);
+        }
+      }
+    }
+  }
+
+  // Update in legacy logs as well
+  const legacyRaw = localStorage.getItem("offlineid_attendance_logs");
+  if (legacyRaw) {
+    try {
+      const logs = JSON.parse(legacyRaw) as AttendanceLog[];
+      const updated = logs.map(l => logIds.includes(l.id) ? { ...l, synced, purged } : l);
+      localStorage.setItem("offlineid_attendance_logs", JSON.stringify(updated));
+    } catch {}
+  }
+}
+
+export async function purgeOldLogsAsync(): Promise<number> {
+  const sessionKey = await getOrCreateSessionKey();
+  const oneDayAgo = Date.now() - (24 * 3600 * 1000);
+  let purgedCount = 0;
+  
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (key && key.startsWith("offlineid:attendance:")) {
+      const encrypted = localStorage.getItem(key);
+      if (encrypted) {
+        try {
+          const logs = await decryptRecord<AttendanceLog[]>(sessionKey, encrypted);
+          const filtered = logs.filter(l => {
+            if (l.purged === 1 && l.timestamp < oneDayAgo) {
+              purgedCount++;
+              return false; // Hard delete
+            }
+            return true;
+          });
+          if (filtered.length === 0) {
+            localStorage.removeItem(key);
+          } else if (filtered.length !== logs.length) {
+            const nextEncrypted = await encryptRecord(sessionKey, filtered);
+            localStorage.setItem(key, nextEncrypted);
+          }
+        } catch (e) {
+          console.error(`Failed to purge attendance log for key ${key}`, e);
+        }
+      }
+    }
+  }
+
+  // Purge legacy logs as well
+  const legacyRaw = localStorage.getItem("offlineid_attendance_logs");
+  if (legacyRaw) {
+    try {
+      const logs = JSON.parse(legacyRaw) as AttendanceLog[];
+      const filtered = logs.filter(l => !(l.purged === 1 && l.timestamp < oneDayAgo));
+      purgedCount += (logs.length - filtered.length);
+      localStorage.setItem("offlineid_attendance_logs", JSON.stringify(filtered));
+    } catch {}
+  }
+
+  return purgedCount;
+}
+
+// ── LEGACY SYNCHRONOUS FALLBACKS FOR TRANSITIONAL COMPATIBILITY ──
 export function initializeStorage() {
   const secretKey = getOrCreateSecureKey();
-  
   if (!localStorage.getItem("offlineid_employees")) {
-    // Generate secure randomized mock Float32Array faceprints
     const seededEmployees = INITIAL_EMPLOYEES.map((emp, idx) => {
       const faceprint = new Float32Array(512).map(() => Math.random() * 0.1 + (idx * 0.05));
       return {
@@ -191,11 +433,9 @@ export function initializeStorage() {
     });
     localStorage.setItem("offlineid_employees", JSON.stringify(seededEmployees));
   }
-
   if (!localStorage.getItem("offlineid_attendance_logs")) {
     localStorage.setItem("offlineid_attendance_logs", JSON.stringify(INITIAL_LOGS));
   }
-
   if (!localStorage.getItem("offlineid_sync_queue")) {
     localStorage.setItem("offlineid_sync_queue", JSON.stringify([]));
   }
@@ -217,7 +457,6 @@ export function getAttendanceLogs(): AttendanceLog[] {
   initializeStorage();
   const raw = localStorage.getItem("offlineid_attendance_logs");
   const parsed = raw ? (JSON.parse(raw) as AttendanceLog[]) : [];
-  // Sort logs: descending by timestamp
   return parsed.sort((a,b) => b.timestamp - a.timestamp);
 }
 
@@ -229,12 +468,7 @@ export function saveAttendanceLog(log: AttendanceLog) {
 
 export function updateAttendanceLogSyncStatus(logIds: string[], synced: number, purged: number) {
   const logs = getAttendanceLogs();
-  const updated = logs.map(l => {
-    if (logIds.includes(l.id)) {
-      return { ...l, synced, purged };
-    }
-    return l;
-  });
+  const updated = logs.map(l => logIds.includes(l.id) ? { ...l, synced, purged } : l);
   localStorage.setItem("offlineid_attendance_logs", JSON.stringify(updated));
 }
 
@@ -242,13 +476,7 @@ export function purgeOldLogs() {
   const logs = getAttendanceLogs();
   const oneDayAgo = Date.now() - (24 * 3600 * 1000);
   const beforePurgeCount = logs.length;
-  // Keep logs that are NOT purged, or are purged but younger than 24 hours
-  const filtered = logs.filter(l => {
-    if (l.purged === 1 && l.timestamp < oneDayAgo) {
-      return false; // Hard delete
-    }
-    return true;
-  });
+  const filtered = logs.filter(l => !(l.purged === 1 && l.timestamp < oneDayAgo));
   localStorage.setItem("offlineid_attendance_logs", JSON.stringify(filtered));
   return beforePurgeCount - filtered.length;
 }
@@ -276,3 +504,4 @@ export function removeFromSyncQueue(entryId: string) {
   const filtered = queue.filter(q => q.id !== entryId);
   localStorage.setItem("offlineid_sync_queue", JSON.stringify(filtered));
 }
+

@@ -1,9 +1,24 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Employee, AttendanceLog, GestureChallenge } from "../types";
-import { getEmployees, saveAttendanceLog } from "../database/db";
-import { simulateRecognition } from "../ml/pipeline";
+import { getEmployees, getEmployeesAsync, saveAttendanceLog, saveAttendanceLogAsync } from "../database/db";
+import { simulateRecognition, extractPixelEmbedding, matchEmployeeAsync } from "../ml/pipeline";
 import { AlertTriangle, CheckCircle2, ShieldCheck } from "lucide-react";
-import { startCamera, waitForVideoReady } from "../utils/camera";
+import { startCamera, waitForVideoReady, captureWithRetry } from "../utils/camera";
+
+const GESTURE_SEQUENCE = [
+  { id: 'still', instruction: 'Hold still and look at the camera', icon: '🎯', holdMs: 2000 },
+  { id: 'turn_right', instruction: 'Slowly turn your head to the right', icon: '➡️', holdMs: 2500 },
+  { id: 'turn_left', instruction: 'Slowly turn your head to the left', icon: '⬅️', holdMs: 2500 },
+  { id: 'blink', instruction: 'Blink your eyes naturally', icon: '👁️', holdMs: 3000 },
+  { id: 'smile', instruction: 'Give a natural smile', icon: '😊', holdMs: 2000 },
+] as const;
+
+const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+const l2Normalize = (v: number[]): number[] => {
+  const norm = Math.sqrt(v.reduce((s, x) => s + x * x, 0)) + 1e-10;
+  return v.map(x => x / norm);
+};
 
 interface ActiveScanViewProps {
   onSuccess: (log: AttendanceLog) => void;
@@ -33,6 +48,13 @@ export const ActiveScanView: React.FC<ActiveScanViewProps> = ({ onSuccess }) => 
   const streamRef = useRef<MediaStream | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [cameraRetryCount, setCameraRetryCount] = useState(0);
+  const [isCameraReady, setIsCameraReady] = useState(false);
+
+  // ── Gesture Scan States
+  const [currentGestureIndex, setCurrentGestureIndex] = useState(0);
+  const [gesturePhase, setGesturePhase] = useState<'instruction' | 'countdown' | 'capturing' | 'done'>('instruction');
+  const [isCapturing, setIsCapturing] = useState(false);
+  const [framesCaptured, setFramesCaptured] = useState(0);
 
   const stopCamera = () => {
     if (streamRef.current) {
@@ -40,15 +62,18 @@ export const ActiveScanView: React.FC<ActiveScanViewProps> = ({ onSuccess }) => 
       streamRef.current = null;
       setStream(null);
     }
+    setIsCameraReady(false);
   };
 
   useEffect(() => {
     let active = true;
-    const list = getEmployees();
-    setEmployees(list);
-    if (list.length > 0) {
-      setSelectedSubjectId(list[0].id);
-    }
+    getEmployeesAsync().then((list) => {
+      if (!active) return;
+      setEmployees(list);
+      if (list.length > 0) {
+        setSelectedSubjectId(list[0].id);
+      }
+    });
     resetChallenge();
     setCameraError(null);
 
@@ -75,6 +100,7 @@ export const ActiveScanView: React.FC<ActiveScanViewProps> = ({ onSuccess }) => 
       .then(() => {
         if (active) {
           console.log('[active-scan] waitForVideoReady resolved');
+          setIsCameraReady(true);
         }
       })
       .catch((err: any) => {
@@ -91,34 +117,80 @@ export const ActiveScanView: React.FC<ActiveScanViewProps> = ({ onSuccess }) => 
     };
   }, [cameraRetryCount]);
 
-  useEffect(() => {
-    if (scanStatus !== "scanning") return;
-    if (countdown <= 0) {
-      evaluateChallenge(true);
-      return;
-    }
-    const timer = setTimeout(() => setCountdown((prev) => prev - 1), 1000);
-    return () => clearTimeout(timer);
-  }, [countdown, scanStatus]);
+
 
   const resetChallenge = () => {
-    const gestures = [GestureChallenge.BLINK, GestureChallenge.SMILE, GestureChallenge.TURN_LEFT, GestureChallenge.TURN_RIGHT];
-    setSelectedGesture(gestures[Math.floor(Math.random() * gestures.length)]);
-    setCountdown(5);
+    setCountdown(3);
+    setFramesCaptured(0);
+    setCurrentGestureIndex(0);
+    setGesturePhase('instruction');
     setScanStatus("scanning");
     setMatchResult(null);
+    setIsCapturing(false);
   };
 
-  const evaluateChallenge = (isTimeout = false) => {
-    setScanStatus("processing");
-    
-    setTimeout(() => {
-      const gDone = isTimeout ? false : (simulatedVerdict !== "gesture_fail");
+  const runGestureScanSequence = useCallback(async () => {
+    setIsCapturing(true);
+    setFramesCaptured(0);
+    setScanStatus("scanning");
+    setMatchResult(null);
+
+    const queryEmbeddings: number[][] = [];
+
+    try {
+      for (let i = 0; i < GESTURE_SEQUENCE.length; i++) {
+        const gesture = GESTURE_SEQUENCE[i];
+
+        // Phase 1: Show instruction
+        setCurrentGestureIndex(i);
+        setGesturePhase('instruction');
+        await delay(1800); // user reads the instruction
+
+        // Phase 2: Countdown
+        setGesturePhase('countdown');
+        for (let c = 3; c >= 1; c--) {
+          setCountdown(c);
+          await delay(700);
+        }
+
+        // Phase 3: Capture the frame
+        setGesturePhase('capturing');
+        await delay(gesture.holdMs); // wait for user to hold the gesture
+
+        let vector: number[] | null = null;
+        if (stream && videoRef.current) {
+          const tempCanvas = document.createElement("canvas");
+          tempCanvas.width = videoRef.current.videoWidth || 400;
+          tempCanvas.height = videoRef.current.videoHeight || 500;
+          const dataUrl = await captureWithRetry(videoRef.current, tempCanvas);
+          if (dataUrl) {
+            vector = extractPixelEmbedding(tempCanvas);
+          }
+        } else {
+          // Simulator fallback
+          await delay(300);
+          const rawVec = new Array(512).fill(0).map(() => Math.random());
+          vector = l2Normalize(rawVec);
+        }
+
+        if (vector) {
+          queryEmbeddings.push(vector);
+        }
+
+        setFramesCaptured(i + 1);
+        await delay(400);
+      }
+
+      setGesturePhase('done');
+      setIsCapturing(false);
+      setScanStatus("processing");
       
-      const res = simulateRecognition(
-        "", 
-        selectedGesture, 
-        gDone, 
+      const requiredGesture = GestureChallenge.BLINK; // fallback info log
+      
+      const res = await matchEmployeeAsync(
+        queryEmbeddings,
+        requiredGesture,
+        simulatedVerdict !== "gesture_fail",
         simulatedVerdict || undefined,
         selectedSubjectId || undefined
       );
@@ -132,7 +204,7 @@ export const ActiveScanView: React.FC<ActiveScanViewProps> = ({ onSuccess }) => 
           confidence: 0,
           score: res.livenessScore,
           passed: false,
-          gestureCompleted: gDone,
+          gestureCompleted: true,
           message: res.message
         });
       } else if (res.matchedEmployee === null) {
@@ -144,7 +216,7 @@ export const ActiveScanView: React.FC<ActiveScanViewProps> = ({ onSuccess }) => 
           confidence: res.confidence,
           score: res.livenessScore,
           passed: true,
-          gestureCompleted: gDone,
+          gestureCompleted: true,
           message: res.message
         });
       } else {
@@ -156,14 +228,34 @@ export const ActiveScanView: React.FC<ActiveScanViewProps> = ({ onSuccess }) => 
           confidence: res.confidence,
           score: res.livenessScore,
           passed: true,
-          gestureCompleted: gDone,
+          gestureCompleted: true,
           message: res.message
         });
       }
-    }, 850);
-  };
+    } catch (err: any) {
+      console.error("Biometric matching error:", err);
+      setScanStatus("failed");
+      setMatchResult({
+        employeeName: "Internal Error",
+        employeeCode: "MATCH_FAILED",
+        employeeId: "error",
+        confidence: 0,
+        score: 0,
+        passed: false,
+        gestureCompleted: false,
+        message: err.message || "Failed to process face scans."
+      });
+      setIsCapturing(false);
+    }
+  }, [stream, selectedSubjectId, simulatedVerdict]);
 
-  const handleConfirmAttendance = () => {
+  useEffect(() => {
+    if (isCameraReady && scanStatus === "scanning" && !isCapturing) {
+      runGestureScanSequence();
+    }
+  }, [isCameraReady, scanStatus, isCapturing, runGestureScanSequence]);
+
+  const handleConfirmAttendance = async () => {
     if (!matchResult || matchResult.employeeId === "threat" || matchResult.employeeId === "not_found") return;
 
     const newLog: AttendanceLog = {
@@ -173,12 +265,12 @@ export const ActiveScanView: React.FC<ActiveScanViewProps> = ({ onSuccess }) => 
       employee_code: matchResult.employeeCode,
       timestamp: Date.now(),
       confidence: matchResult.confidence,
-      gesture_used: selectedGesture.charAt(0) + selectedGesture.slice(1).toLowerCase().replace("_", " "),
+      gesture_used: "Multi-Gesture Liveness Scan",
       synced: 0,
       purged: 0
     };
 
-    saveAttendanceLog(newLog);
+    await saveAttendanceLogAsync(newLog);
     onSuccess(newLog);
     resetChallenge();
   };
@@ -202,7 +294,9 @@ export const ActiveScanView: React.FC<ActiveScanViewProps> = ({ onSuccess }) => 
           autoPlay
           playsInline
           muted
-          className={`w-full h-full object-cover scale-x-[-1] ${stream ? "block" : "hidden"}`}
+          className={`w-full h-full object-cover scale-x-[-1] transition-opacity duration-300 ${
+            isCameraReady ? "opacity-100" : "opacity-0"
+          }`}
         />
         {!stream && cameraError ? (
           <div className="w-full h-full absolute inset-0 bg-gradient-to-br from-slate-900 via-slate-800 to-slate-950 flex flex-col items-center justify-center text-center p-4 z-10 animate-fade-in">
@@ -269,7 +363,7 @@ export const ActiveScanView: React.FC<ActiveScanViewProps> = ({ onSuccess }) => 
           {DEMO_OPTIONS.map((opt) => (
             <button
               key={opt.key}
-              onClick={() => { setSimulatedVerdict(opt.key); setScanStatus("scanning"); setCountdown(5); }}
+              onClick={() => { setSimulatedVerdict(opt.key); resetChallenge(); }}
               className={`py-1.5 rounded-lg text-[10px] font-semibold transition-spring ${
                 simulatedVerdict === opt.key ? `${opt.color} text-white shadow-sm` : "bg-white/10 text-slate-300 hover:bg-white/15"
               }`}
@@ -289,8 +383,7 @@ export const ActiveScanView: React.FC<ActiveScanViewProps> = ({ onSuccess }) => 
               onChange={(e) => {
                 setSelectedSubjectId(e.target.value);
                 setSimulatedVerdict("match");
-                setScanStatus("scanning");
-                setCountdown(5);
+                resetChallenge();
               }}
               className="bg-neutral-800 text-white border border-white/20 rounded px-2 py-1 text-[10px] outline-none max-w-[170px]"
             >
@@ -304,41 +397,67 @@ export const ActiveScanView: React.FC<ActiveScanViewProps> = ({ onSuccess }) => 
         )}
       </div>
 
-      {/* Gesture Prompt */}
-      <div className="absolute top-[280px] w-full text-center z-10 flex flex-col items-center gap-3">
-        {scanStatus === "scanning" && (
-          <div className="flex flex-col items-center gap-3 animate-fade-in">
-            <div className="glass-dark px-6 py-2.5 rounded-xl">
-              <p className="text-lg font-extrabold tracking-wide uppercase text-white animate-breathe">
-                Please {gestureLabel} now
-              </p>
-            </div>
-            <div className="w-12 h-12 rounded-full border-2 border-white/80 flex items-center justify-center bg-black/40 shadow-lg animate-countdown-pulse">
-              <span className="text-sm font-extrabold">{countdown}s</span>
-            </div>
-            <button
-              onClick={() => evaluateChallenge(false)}
-              className="mt-1 bg-emerald-500/90 hover:bg-emerald-500 text-white px-5 py-1.5 rounded-full text-xs font-bold active:scale-95 transition-spring shadow-lg"
-            >
-              ✓ Perform Gesture
-            </button>
+      {/* Gesture UI Overlay */}
+      {isCameraReady && scanStatus === "scanning" && (
+        <div className="absolute inset-x-0 top-32 flex flex-col items-center z-10 px-4">
+          {/* Gesture instruction card */}
+          <div className="bg-black/70 backdrop-blur-sm rounded-2xl px-5 py-3 flex items-center gap-3 border border-white/10 shadow-lg">
+            <span className="text-2xl">{GESTURE_SEQUENCE[currentGestureIndex].icon}</span>
+            <span className="text-white text-sm font-medium text-center">
+              {GESTURE_SEQUENCE[currentGestureIndex].instruction}
+            </span>
           </div>
-        )}
 
-        {scanStatus === "processing" && (
-          <div className="glass-dark px-6 py-4 rounded-xl flex flex-col items-center gap-2 animate-fade-in">
-            <div className="w-8 h-8 border-3 border-[#005bbf]/40 border-t-[#005bbf] rounded-full animate-spin"></div>
-            <p className="text-xs font-semibold text-slate-300">Running ONNX pipeline...</p>
-            <div className="flex gap-1 mt-1">
-              {["SCRFD", "FASNet", "ArcFace"].map((step, i) => (
-                <span key={step} className="text-[8px] font-bold px-2 py-0.5 rounded-full bg-[#005bbf]/20 text-[#60a5fa]">
-                  {step}
-                </span>
-              ))}
+          {/* Countdown pulse ring */}
+          {gesturePhase === 'countdown' && (
+            <div className="mt-3 w-12 h-12 rounded-full border-4 border-blue-400 flex items-center justify-center animate-pulse bg-black/40 shadow-md">
+              <span className="text-white text-lg font-bold">{countdown}</span>
             </div>
+          )}
+
+          {/* Capturing flash indicator */}
+          {gesturePhase === 'capturing' && (
+            <div className="mt-3 px-3 py-1 bg-green-500/80 rounded-full shadow-md">
+              <span className="text-white text-xs font-semibold tracking-wider">
+                ● CAPTURING
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {scanStatus === "processing" && (
+        <div className="absolute inset-0 bg-black/70 flex flex-col items-center justify-center gap-2 z-20">
+          <div className="w-8 h-8 border-3 border-[#005bbf]/40 border-t-[#005bbf] rounded-full animate-spin"></div>
+          <p className="text-xs font-semibold text-slate-300 font-medium">Running ONNX pipeline...</p>
+          <div className="flex gap-1 mt-1">
+            {["SCRFD", "FASNet", "ArcFace"].map((step) => (
+              <span key={step} className="text-[8px] font-bold px-2 py-0.5 rounded-full bg-[#005bbf]/20 text-[#60a5fa]">
+                {step}
+              </span>
+            ))}
           </div>
-        )}
-      </div>
+        </div>
+      )}
+
+      {/* Frame progress dots at bottom */}
+      {isCameraReady && scanStatus === "scanning" && (
+        <div className="absolute bottom-28 inset-x-0 flex justify-center gap-2 z-10">
+          {GESTURE_SEQUENCE.map((g, i) => (
+            <div
+              key={g.id}
+              className={`w-2 h-2 rounded-full transition-all duration-300 ${
+                i < framesCaptured
+                  ? 'bg-green-400 scale-125 shadow-sm shadow-green-400/50'
+                  : i === currentGestureIndex
+                  ? 'bg-blue-400 animate-pulse'
+                  : 'bg-white/30'
+              }`}
+            />
+          ))}
+        </div>
+      )}
+
 
       {/* Bottom Results */}
       <div className="mt-auto relative z-10">

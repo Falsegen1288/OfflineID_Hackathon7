@@ -1,5 +1,5 @@
-import React, { useState } from "react";
-import { getOrCreateSecureKey, purgeOldLogs, getEmployees } from "../database/db";
+import React, { useState, useEffect } from "react";
+import { getOrCreateSecureKey, purgeOldLogsAsync, getEmployeesAsync } from "../database/db";
 import { MODEL_METADATA } from "../ml/pipeline";
 import { ShieldCheck, Key, Trash2, Cpu, Users, LogOut, Mail, Phone, Calendar, Building, X, User } from "lucide-react";
 import { Employee } from "../types";
@@ -15,10 +15,22 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onCacheReset, curren
   const [purgeResult, setPurgeResult] = useState<string | null>(null);
   const [showAll, setShowAll] = useState(false);
   const [selectedEmp, setSelectedEmp] = useState<Employee | null>(null);
-  const employees = getEmployees();
+  const [employees, setEmployees] = useState<Employee[]>([]);
 
-  const runPurgeMock = () => {
-    const purgesNum = purgeOldLogs();
+  useEffect(() => {
+    let active = true;
+    getEmployeesAsync().then((list) => {
+      if (active) {
+        setEmployees(list);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const runPurgeMock = async () => {
+    const purgesNum = await purgeOldLogsAsync();
     setPurgeResult(`Purge completed. Hard-deleted ${purgesNum} synced records older than 24 hours.`);
     onCacheReset();
     setTimeout(() => setPurgeResult(null), 3000);

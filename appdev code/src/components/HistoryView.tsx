@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { AttendanceLog } from "../types";
-import { getAttendanceLogs } from "../database/db";
+import { getAttendanceLogsAsync } from "../database/db";
 import { Search, Calendar, CheckSquare, Clock, Filter } from "lucide-react";
 
 interface HistoryViewProps {
@@ -22,7 +22,15 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ logsVersion }) => {
   const [activeFilter, setActiveFilter] = useState<"all" | "synced" | "pending">("all");
 
   useEffect(() => {
-    setLogs(getAttendanceLogs());
+    let active = true;
+    getAttendanceLogsAsync().then((list) => {
+      if (active) {
+        setLogs(list);
+      }
+    });
+    return () => {
+      active = false;
+    };
   }, [logsVersion]);
 
   const filteredLogs = logs.filter((log) => {
