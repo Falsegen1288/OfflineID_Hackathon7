@@ -601,7 +601,14 @@ export const RegistrationWizard: React.FC<RegistrationWizardProps> = ({ onSucces
                   </span>
                 </div>
               </div>
+
             </div>
+
+            {errorMsg && (
+              <p className="text-red-500 text-xs font-semibold text-center bg-red-50 p-2 rounded-lg border border-red-100 animate-fade-in w-full max-w-xs mx-auto">
+                {errorMsg}
+              </p>
+            )}
 
             {/* Actions */}
             <div className="flex flex-col gap-2">
