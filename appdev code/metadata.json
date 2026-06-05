@@ -1,0 +1,8 @@
+{
+  "name": "OfflineID",
+  "description": "Offline facial recognition and attendance system for zero-network zones with on-device liveness metrics and database syncing.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,14 @@
+# Python requirements for model prep scripts
+# Run: pip install -r requirements_scripts.txt
+
+onnx>=1.15.0
+onnxruntime>=1.17.0
+onnxruntime-tools>=1.7.0
+numpy>=1.24.0
+opencv-python>=4.8.0
+torch>=2.0.0
+torchvision>=0.15.0
+insightface>=0.7.3
+Pillow>=10.0.0
+scikit-learn>=1.3.0
+tqdm>=4.65.0

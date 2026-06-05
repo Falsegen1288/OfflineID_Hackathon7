@@ -1,0 +1,14 @@
+node_modules/
+.env
+*.keystore
+*.p12
+ios/Pods/
+android/build/
+android/.gradle/
+*.onnx
+!models/README_models.md
+__pycache__/
+*.pyc
+.DS_Store
+build/
+dist/
